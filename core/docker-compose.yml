@@ -4,7 +4,6 @@
 # CACH CHAY (KHONG chay truc tiep file .env goc):
 #   node scripts/bootstrap.mjs            # resolve ${VAR} -> .env.resolved
 #   docker compose --env-file .env.resolved -f core/docker-compose.yml up -d
-# bootstrap.mjs set COMPOSE_PROFILES (vd: core,coordinator,rclone).
 #
 # EXPOSE QUA DOMAIN: moi service co label dockflare.* -> DockFlare tu tao DNS +
 # tunnel ingress + Zero Trust Access theo hostname <sub>.<DOMAIN>.
@@ -28,7 +27,6 @@ services:
       - USE_REDIS=${DOCKFLARE_REDIS_ENABLE:-false}
       - REDIS_URL=${DOCKFLARE_REDIS_URL:-}
     labels:
-      # DockFlare UI tu expose chinh no qua tunnel (neu co DOCKFLARE_HOSTNAME)
       - "dockflare.enable=true"
       - "dockflare.hostname=${DOCKFLARE_HOSTNAME}"
       - "dockflare.service=http://dockflare:5000"
@@ -51,7 +49,7 @@ services:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/redis:/data
 
   # --------------------------------------------------------------------------
-  # COORDINATOR - lifecycle handover (RTDB) - noi bo, khong expose
+  # COORDINATOR - lifecycle handover (RTDB) - noi bo
   # --------------------------------------------------------------------------
   coordinator:
     build: ../services/coordinator
@@ -90,12 +88,12 @@ services:
 
   # --------------------------------------------------------------------------
   # LITESTREAM - SQLite realtime -> S3 Supabase - noi bo
+  # Build image rieng (FROM alpine) vi image goc :latest co bien the thieu /bin/sh.
   # --------------------------------------------------------------------------
   litestream:
-    image: litestream/litestream:latest
+    build: ../services/litestream
     profiles: ["litestream"]
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     environment:
       - LITESTREAM_DB_PATH=${LITESTREAM_DB_PATH}
       - LITESTREAM_S3_ENDPOINT=${LITESTREAM_S3_ENDPOINT}
@@ -104,8 +102,6 @@ services:
       - LITESTREAM_S3_SECRET_ACCESS_KEY=${LITESTREAM_S3_SECRET_ACCESS_KEY}
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
-      - ../services/litestream/litestream.yml:/etc/litestream.yml:ro
-      - ../services/litestream/entrypoint.sh:/entrypoint.sh:ro
 
   # --------------------------------------------------------------------------
   # TAILSCALE - mang noi bo
@@ -157,7 +153,6 @@ services:
     profiles: ["filebrowser"]
     restart: unless-stopped
     environment:
-      # QUAN TRONG: image doc FB_*, map tuong minh tu FILEBROWSER_*
       - FB_PORT=${FILEBROWSER_PORT:-8081}
       - FB_ROOT=${FILEBROWSER_ROOT:-/srv}
       - FB_BASEURL=${FILEBROWSER_BASEURL:-}
@@ -188,5 +183,4 @@ services:
       - "dockflare.enable=true"
       - "dockflare.hostname=${TTYD_HOSTNAME}"
       - "dockflare.service=http://ttyd:${TTYD_PORT:-7681}"
-      # ttyd LUON bat Access (khong bao gio public tran)
       - "dockflare.access=true"
