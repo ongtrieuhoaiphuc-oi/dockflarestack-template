@@ -15,7 +15,7 @@
 - **Khong bao gio** commit secret vao repo. Secret goc doc tu CI Secrets / Key Vault / env.
 - Chi cache gia tri **khong nhay cam** (vd `accountId`). Khong cache token/key/2FA.
 - Log phai **mask** secret (chi hien 4 ky tu cuoi).
-- Moi env ho tro **fallback Base64 -> RAW**: thu decode base64, khong hop le thi dung RAW.
+- Moi env ho tro **fallback Base64 -> RAW**: thu decode base64, sau decode phai VALIDATE THEO NGU CANH (vd service account phai JSON.parse duoc) moi chap nhan; khong hop le thi dung RAW.
 - Global API key nen thay bang scoped token khi co the.
 
 ## 3. Rule key trung lap
@@ -27,40 +27,51 @@
 
 - Moi module co flag rieng theo prefix dich vu: `COORDINATOR_ENABLE`, `RCLONE_ENABLE`, `LITESTREAM_ENABLE`, `TAILSCALE_ENABLE`, `DOZZLE_ENABLE`, `FILEBROWSER_ENABLE`, `TTYD_ENABLE`.
 - Compose dung **profiles** de include/exclude theo flag.
+- **`bootstrap.mjs` dong bo flag <-> profiles:** doc moi `<SERVICE>_ENABLE` roi tu sinh `COMPOSE_PROFILES` truoc khi `docker compose up`. KHONG de `.env` flag va CLI `--profile` la 2 nguon lech nhau.
 - Module tu kiem tra du env khong; thieu -> canh bao + tu tat.
 - Them module moi: tao thu muc rieng trong `services/`, them `compose.<name>.yml` + flag, KHONG sua core.
 
 ## 4b. Rule ENV (quy uoc chung)
 
 - **Prefix theo dich vu** cho moi env de tranh xung dot: `DOCKFLARE_`, `COORDINATOR_`, `RTDB_`, `RCLONE_`, `LITESTREAM_`, `TAILSCALE_`, `DOZZLE_`, `FILEBROWSER_`, `TTYD_`.
-- **Dung day du env ma moi dich vu cung cap**, khong bo sot. Moi env co **gia tri mac dinh hop ly** de chay duoc ngay.
-- `.env.example` la nguon su that: **moi env phai co comment** giai thich tac dung, cach lay/cau hinh, va **neu la gia tri chon (enum) phai liet ke day du cac gia tri hop le** kem gia tri mac dinh.
+- **Map tuong minh env noi bo -> env that cua image** (xem bang trong `docs/04`). Image nhu Filebrowser (`FB_*`), ttyd (CLI args), Tailscale (`TS_*`) KHONG doc prefix cua ta -> phai map o compose/entrypoint, khong dua vao trung ten (tranh silent-fail).
+- **Dung day du env ma moi dich vu cung cap**, khong bo sot. Moi env co **gia tri mac dinh hop ly**.
+- `.env.example` la nguon su that: **moi env co comment** giai thich tac dung, cach lay, va **liet ke day du gia tri enum** kem mac dinh.
+- **Path ben vung derive tu `${DOCKER_VOLUMES_DIR}`**, khong hardcode rieng le (tranh mat data khi doi thu muc volume).
 - Flag bat/tat dang `<SERVICE>_ENABLE` (mac dinh `false` cho module tuy chon).
-- Fallback **Base64 -> RAW** ap dung cho moi env.
+- Fallback **Base64 -> RAW** + validate theo ngu canh cho moi env.
 
 ## 5. Rule moi truong (core + overlay)
 
 - **1 core chung.** Moi moi truong (GH host/selfhost, Azure host/selfhost, local) chi la **overlay mong** trong `ci/`.
 - Khong copy-paste logic giua cac moi truong; dung reusable workflow + matrix.
 - CI cache (build / pull / `.docker-volumes`) dat o **tang yml**, KHONG nhet vao code app.
-- Data luon map vao `.docker-volumes` (configurable).
+- Data luon map vao `.docker-volumes` (configurable qua `DOCKER_VOLUMES_DIR`).
 
 ## 6. Rule lifecycle / handover
 
 - Lien lac giua instance chi qua **RTDB** (lock/heartbeat/handoff).
+- **Atomic lock BAT BUOC:** ETag `if-match` hoac Firebase `runTransaction`, khong GET-roi-PUT (tranh split-brain). Fence token tang dan.
+- **Server timestamp:** dung `{".sv":"timestamp"}`, khong dung dong ho client.
 - **Con song thi read-only.** Chi 1 primary duoc ghi tai mot thoi diem.
+- **Watcher deadline:** handover o moc buffer truoc deadline, khong doi sat gio.
+- **Flush guard:** chi flush module dang bat, log ro khi skip.
 - Instance cu co option tu thoat khi cai moi ready.
 - Chung 1 Cloudflare tunnel, nhieu connector -> khong dut traffic khi chuyen.
 - Flush (rclone push + litestream) phai xong TRUOC khi nha lock.
+- Lock path derive theo `STACK_ID` de tranh dung do giua cac stack.
 
 ## 7. Definition of Done cho moi thay doi
 
 - [ ] Core van `docker compose up` duoc khi tat het module tuy chon.
 - [ ] Khong co secret trong diff.
 - [ ] Log ro tung buoc, secret duoc mask.
-- [ ] Module moi co flag + profile + tu disable khi thieu env.
+- [ ] Module moi co flag + profile + tu disable khi thieu env + bootstrap sinh COMPOSE_PROFILES.
+- [ ] Env noi bo da map tuong minh sang env that cua image.
+- [ ] Path derive tu `DOCKER_VOLUMES_DIR`, khong hardcode.
+- [ ] Coordinator dung ETag/transaction + server timestamp.
 - [ ] Thay doi moi truong chi nam trong `ci/`, khong dung core.
 
 ## 8. AGENT prompt (dan cho AI agent)
 
-> Ban dang lam tren **dockflarestack-template**. Triet ly: cau hinh hon code, code toi thieu, log ro. Toan bo script la Node `.mjs`, moi nghiep vu mot module trong thu muc rieng. KHONG commit secret, KHONG pha core, module tuy chon phai tu disable khi thieu env (graceful). Moi env fallback Base64->RAW. Key trung thi health-check + fallback. Lien lac instance qua RTDB, con song thi read-only, chung 1 tunnel nhieu connector. Truoc khi commit, kiem Definition of Done o muc 7.
+> Ban dang lam tren **dockflarestack-template**. Triet ly: cau hinh hon code, code toi thieu, log ro. Toan bo script la Node `.mjs`, moi nghiep vu mot module trong thu muc rieng. KHONG commit secret, KHONG pha core, module tuy chon phai tu disable khi thieu env (graceful) va bootstrap.mjs phai sinh COMPOSE_PROFILES tu cac flag ENABLE. Moi env fallback Base64->RAW + validate theo ngu canh. Map tuong minh env noi bo -> env that cua image (FB_*, TS_*, ttyd CLI args). Path derive tu DOCKER_VOLUMES_DIR. Key trung thi health-check + fallback. Coordinator dung ETag/transaction + server timestamp + fence token; lien lac instance qua RTDB, con song thi read-only, chung 1 tunnel nhieu connector; watcher handover truoc deadline; flush guard theo flag. Truoc khi commit, kiem Definition of Done o muc 7.

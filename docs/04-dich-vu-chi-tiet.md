@@ -18,6 +18,22 @@ Moi env dung **prefix theo dich vu** de tranh xung dot. Flag bat/tat: `<SERVICE>
 | Filebrowser | `FILEBROWSER_` | `FILEBROWSER_ENABLE` |
 | ttyd/WebSSH | `TTYD_` | `TTYD_ENABLE` |
 
+### Bang mapping: env noi bo (template) -> env that cua image
+
+**QUAN TRONG:** mot so image KHONG doc prefix cua ta. Compose/entrypoint phai map tuong minh, KHONG dua vao trung ten ngau nhien (neu khong container se silent-fail: am tham dung default sai, khong bao loi).
+
+| Service | Env noi bo (template) | Env/arg that cua image | Cach map |
+|---|---|---|---|
+| Filebrowser | `FILEBROWSER_PORT/ROOT/BASEURL` | `FB_PORT/FB_ROOT/FB_BASEURL/FB_DATABASE` | compose `environment:` map thang `FB_PORT=${FILEBROWSER_PORT}` |
+| ttyd | `TTYD_PORT/_CREDENTIAL/_WRITABLE/_CMD/_MAX_CLIENTS` | CLI args `-p -c -W --max-clients <cmd>` | entrypoint wrapper dung mang args, escape/word-split ky |
+| Tailscale | `TAILSCALE_CLIENT_ID/_SECRET/_TAGS/_STATE_DIR/_EPHEMERAL` | `TS_AUTHKEY / TS_STATE_DIR / TS_EXTRA_ARGS` | adapter: OAuth -> API lay ephemeral authkey -> `TS_AUTHKEY`; `_TAGS` -> `TS_EXTRA_ARGS=--advertise-tags=...` |
+| Dozzle | `DOZZLE_*` | `DOZZLE_*` | trung ten, map thang (OK) |
+| litestream | `LITESTREAM_S3_*` | field trong `litestream.yml` | template render file yml tu env |
+
+**ttyd escaping:** `TTYD_CREDENTIAL` co the chua ky tu dac biet, `TTYD_CMD` dang `ssh user@host` can word-split dung -> entrypoint dung mang args (khong noi chuoi tho) de tranh injection/lenh sai.
+
+Fallback **Base64 -> RAW** ap dung cho moi env; sau decode phai validate theo ngu canh moi chap nhan.
+
 ---
 
 ## 1. Dozzle - realtime log viewer
@@ -33,7 +49,7 @@ Moi env dung **prefix theo dich vu** de tranh xung dot. Flag bat/tat: `<SERVICE>
 ## 2. Filebrowser - quan ly file qua web
 **Image:** `filebrowser/filebrowser`
 **Muc dich:** duyet/sua/upload file trong `.docker-volumes` qua web.
-**Env/config:** cau hinh qua flag/`config` file; bien map `FB_` (vd `FB_DATABASE`, `FB_ROOT`, `FB_PORT`, `FB_BASEURL`). Mount 3 volume: data (`/srv`), database, config.
+**Env/config:** image doc bien `FB_` (vd `FB_DATABASE`, `FB_ROOT`, `FB_PORT`, `FB_BASEURL`). Compose PHAI map `FB_PORT=${FILEBROWSER_PORT}`... (xem bang mapping o dau file). Mount 3 volume: data (`/srv`), database, config.
 **Cach dung:** tro `/srv` vao `.docker-volumes`. Lan dau tao admin user, doi mat khau mac dinh ngay.
 **Kiem tra dung:** dang nhap -> thay cay thu muc. Smoke: tao file test tren host -> refresh UI phai thay; upload qua UI -> host phai co.
 **Luu y:** co fork `gtstef/filebrowser` (Quantum) env-first manh hon - can xac nhan.
@@ -44,8 +60,8 @@ Moi env dung **prefix theo dich vu** de tranh xung dot. Flag bat/tat: `<SERVICE>
 ## 3. ttyd (WebSSH Linux) - terminal qua web
 **Image:** `tsl0922/ttyd`
 **Muc dich:** SSH vao host/runner qua trinh duyet.
-**Cau hinh (qua CLI args):** `-p 7681` (port), `-c user:pass` (basic auth), `-W` (writable), `--ssl` kem cert. Vd: `ttyd -p 7681 -c admin:secret bash`. De SSH vao host: `ttyd ssh user@host`.
-**Prefix env template:** bao args vao `TTYD_*` (`TTYD_PORT`, `TTYD_CREDENTIAL`, `TTYD_CMD`) roi entrypoint dung CLI.
+**Cau hinh (qua CLI args, KHONG phai env):** `-p 7681` (port), `-c user:pass` (basic auth), `-W` (writable), `--ssl` kem cert. Vd: `ttyd -p 7681 -c admin:secret bash`.
+**Entrypoint wrapper:** dung mang args tu `TTYD_PORT/_CREDENTIAL/_WRITABLE/_CMD/_MAX_CLIENTS`, escape ky (credential co ky tu dac biet, cmd `ssh user@host` can word-split dung) -> tranh injection.
 **Kiem tra dung:** mo UI cong 7681 -> hien terminal, `whoami` tra dung host runner. Smoke: tao file qua terminal -> kiem tra tren host.
 **Bao mat:** BAT BUOC co auth (`-c`) + uu tien chi expose qua Tailscale/Cloudflare Access.
 **Link:** https://github.com/tsl0922/ttyd
@@ -54,21 +70,25 @@ Moi env dung **prefix theo dich vu** de tranh xung dot. Flag bat/tat: `<SERVICE>
 
 ## 4. Coordinator + RTDB - lifecycle handover
 **Muc dich:** chong restart 60 phut. Giu write-lock / heartbeat / handoff tren Google RTDB.
-**Env:** `COORDINATOR_ENABLE`, `RTDB_URL`, `RTDB_SERVICE_ACCOUNT` (base64->raw), `COORDINATOR_LOCK_PATH`, `COORDINATOR_HEARTBEAT_SEC`, `COORDINATOR_SESSION_TTL_SEC`.
+**Env:** `COORDINATOR_ENABLE`, `RTDB_URL`, `RTDB_SERVICE_ACCOUNT` (base64->raw), `STACK_ID`, `COORDINATOR_LOCK_PATH` (default derive `/stack/${STACK_ID}`), `COORDINATOR_HEARTBEAT_SEC`, `COORDINATOR_SESSION_TTL_SEC`, `COORDINATOR_HANDOVER_BUFFER_SEC`.
 **Schema RTDB de xuat:**
 ```
 /stack/<stackId>/
-  primary:   { instanceId, since, expiresAt }
+  primary:   { instanceId, fenceToken, since, expiresAt }
   instances: { <id>: { state: starting|ready|readonly|exiting, heartbeat } }
   handoff:   { requestedBy, at }
 ```
+**Atomic bat buoc:** gianh `primary` dung conditional write ETag (`if-match`) hoac Firebase Admin `runTransaction`, KHONG GET-roi-PUT thuong (race -> split-brain). Moi primary mang fenceToken tang dan de instance zombie cu khong ghi de.
+**Server timestamp:** moi `expiresAt`/`heartbeat` lay tu `{".sv":"timestamp"}` cua RTDB server, KHONG lay `Date.now()` client (runner lech gio).
+**Watcher deadline:** dem nguoc tu thoi diem start job, kich hoat handover o moc buffer an toan (vd phut 50/60), khong doi sat gio (tranh SIGKILL cat giua flush).
+**Flush guard:** truoc khi nha lock, chi flush module dang bat: `if RCLONE_ENABLE -> push`, `if LITESTREAM_ENABLE -> checkpoint`. Module tat thi log ro `flush skipped: rclone disabled`.
 **Kiem tra dung (smoke):** chay 2 instance local. A len truoc = primary. Khoi B -> primary doi sang B, A readonly. Thu ghi tu A -> bi tu choi. Khong duoc co 2 primary cung luc.
 
 ---
 
 ## 5. rclone - sync bulk .docker-volumes
 **Muc dich:** pull `.docker-volumes` ve truoc khi start, push khi gan het gio.
-**Env:** `RCLONE_ENABLE`, `RCLONE_CONFIG` (base64->raw), hoac inline `RCLONE_CONFIG_<REMOTE>_TYPE`..., `RCLONE_REMOTE`, `RCLONE_PATH`.
+**Env:** `RCLONE_ENABLE`, va 2 bien tach rieng de tranh mo ho: `RCLONE_CONFIG_PATH` (duong dan file conf co san, uu tien) HOAC `RCLONE_CONFIG_CONTENT` (noi dung conf, base64/raw, ghi ra file tam). `RCLONE_REMOTE`, `RCLONE_PATH`.
 **Cach dung:** `rclone sync <remote>:<path> /.docker-volumes` luc start; nguoc lai luc flush. Dung `--dry-run` de test truoc.
 **Kiem tra dung (smoke):** tao file trong volume -> push -> kiem tra remote co file. Xoa local -> pull -> file quay ve.
 **Link:** https://rclone.org/docs/
@@ -80,7 +100,7 @@ Moi env dung **prefix theo dich vu** de tranh xung dot. Flag bat/tat: `<SERVICE>
 **Config (`litestream.yml`):**
 ```yaml
 dbs:
-  - path: /.docker-volumes/app.db
+  - path: ${LITESTREAM_DB_PATH}
     replicas:
       - type: s3
         endpoint: ${LITESTREAM_S3_ENDPOINT}
@@ -88,7 +108,7 @@ dbs:
         access-key-id: ${LITESTREAM_S3_ACCESS_KEY_ID}
         secret-access-key: ${LITESTREAM_S3_SECRET_ACCESS_KEY}
 ```
-**Env:** `LITESTREAM_ENABLE`, `LITESTREAM_S3_ENDPOINT`, `LITESTREAM_S3_BUCKET`, `LITESTREAM_S3_ACCESS_KEY_ID`, `LITESTREAM_S3_SECRET_ACCESS_KEY`.
+**Env:** `LITESTREAM_ENABLE`, `LITESTREAM_S3_ENDPOINT`, `LITESTREAM_S3_BUCKET`, `LITESTREAM_S3_ACCESS_KEY_ID`, `LITESTREAM_S3_SECRET_ACCESS_KEY`, `LITESTREAM_DB_PATH` (derive tu `DOCKER_VOLUMES_DIR`).
 **Cach dung:** `litestream restore -if-db-not-exists` luc start -> `litestream replicate` chay nen.
 **Kiem tra dung (smoke):** ghi 1 row -> co object moi tren S3. Xoa DB local -> restart -> restore keo lai -> row van con.
 **Link:** https://litestream.io/reference/config/ , https://litestream.io/guides/s3-compatible/
@@ -98,17 +118,17 @@ dbs:
 ## 7. Tailscale - mang noi bo
 **Image:** `tailscale/tailscale`
 **Muc dich:** mang rieng giua cac instance/service, expose noi bo an toan.
-**Env:** `TS_AUTHKEY` (hoac `TS_CLIENT_ID`+`TS_CLIENT_SECRET` cho OAuth), `TS_STATE_DIR=/var/lib/tailscale`, `TS_USERSPACE=false`, `TS_EXTRA_ARGS=--advertise-tags=tag:container`. Ho tro `*_FILE`.
-**Map credentials:** dung `tailscale.com.TrustCredentials` (clientId + secretId) -> OAuth.
+**Env noi bo -> image:** `TAILSCALE_CLIENT_ID/_SECRET` (OAuth) -> adapter goi API lay ephemeral authkey -> `TS_AUTHKEY`; `TAILSCALE_TAGS` -> `TS_EXTRA_ARGS=--advertise-tags=...`; `TAILSCALE_STATE_DIR` -> `TS_STATE_DIR`. Ho tro `*_FILE`.
+**Map credentials:** dung `tailscale.com.TrustCredentials` (clientId + secretId).
 **Cach dung:** container can `/dev/net/tun` + `cap_add: net_admin`. Service khac dung `network_mode: service:tailscale`.
-**Kiem tra dung (smoke):** `tailscale status` -> thay node join. Ping node khac qua IP 100.x.
+**Kiem tra dung (smoke):** `tailscale status` -> thay node join. Ping node khac qua IP 100.x. Node ephemeral tu bien mat sau khi thoat.
 **Link:** https://tailscale.com/docs/features/containers/docker/docker-params
 
 ---
 
 ## 8. DockFlare (core) - Cloudflare Tunnel controller
 **Muc dich:** tu tao tunnel/DNS/Zero Trust theo Docker label.
-**Env chinh:** `DOCKFLARE_CF_API_TOKEN` (scoped token), `DOCKFLARE_CF_ACCOUNT_ID` (resolve neu thieu), `DOCKFLARE_TUNNEL_NAME`. Master/agent + Redis event bus.
+**Env chinh:** `DOCKFLARE_CF_API_TOKEN` (scoped token), `DOCKFLARE_CF_ACCOUNT_ID` (resolve neu thieu), `DOCKFLARE_TUNNEL_NAME`, `DOCKFLARE_REDIS_ENABLE` + `DOCKFLARE_REDIS_URL/HOST/PORT/PASSWORD` (khi multi-host).
 **Label tren app:** `dockflare.enable=true`, `dockflare.hostname=app.example.com`, `dockflare.service=http://app:3000`.
 **Kiem tra dung (smoke):** gan label cho 1 app test -> tu tao DNS + ingress -> truy cap hostname tu ngoai ra app. Tat app -> rule tu don.
 **Link:** https://github.com/ChrispyBacon-dev/DockFlare/wiki , https://dockflare.app
