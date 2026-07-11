@@ -8,7 +8,9 @@
 2. **Log ro tung buoc.** Moi script `.mjs` phai log buoc dang lam, input (da mask secret), ket qua, ly do fallback.
 3. **Moi nghiep vu mot module.** Khong gom nhieu nghiep vu vao 1 file. resolve / coordinator / rclone / litestream / tailscale / dozzle / filebrowser / ttyd tach bach.
 4. **Khong pha core.** Thay doi o `services/*` va `ci/*` khong duoc lam core fail. Core chay duoc doc lap khong can module tuy chon.
-5. **Graceful, khong fail-fast.** Module thieu env -> canh bao + tu disable, KHONG lam sap stack.
+5. **Graceful, khong fail-fast - NHUNG chia 2 lop:**
+   - **Module thuong** (rclone, litestream, tailscale, coordinator...): thieu env -> canh bao + tu disable, stack van chay (fail-open duoc phep).
+   - **Module co be mat bao mat** (ttyd, dozzle khi expose, filebrowser): thieu credential bat buoc -> **fail-closed**, container KHONG start du `ENABLE=true`. Tuyet doi khong "chay tiep khong auth".
 
 ## 2. Rule secrets (bat buoc)
 
@@ -27,8 +29,8 @@
 
 - Moi module co flag rieng theo prefix dich vu: `COORDINATOR_ENABLE`, `RCLONE_ENABLE`, `LITESTREAM_ENABLE`, `TAILSCALE_ENABLE`, `DOZZLE_ENABLE`, `FILEBROWSER_ENABLE`, `TTYD_ENABLE`.
 - Compose dung **profiles** de include/exclude theo flag.
-- **`bootstrap.mjs` dong bo flag <-> profiles:** doc moi `<SERVICE>_ENABLE` roi tu sinh `COMPOSE_PROFILES` truoc khi `docker compose up`. KHONG de `.env` flag va CLI `--profile` la 2 nguon lech nhau.
-- Module tu kiem tra du env khong; thieu -> canh bao + tu tat.
+- **`bootstrap.mjs` dong bo flag <-> profiles:** doc moi `<SERVICE>_ENABLE` roi tu sinh `COMPOSE_PROFILES` truoc khi `docker compose up`, luon co profile `core`. KHONG de `.env` flag va CLI `--profile` la 2 nguon lech nhau.
+- Module tu kiem tra du env khong; thieu -> canh bao + tu tat (tru module bao mat: fail-closed, xem 1.5).
 - Them module moi: tao thu muc rieng trong `services/`, them `compose.<name>.yml` + flag, KHONG sua core.
 
 ## 4b. Rule ENV (quy uoc chung)
@@ -37,7 +39,9 @@
 - **Map tuong minh env noi bo -> env that cua image** (xem bang trong `docs/04`). Image nhu Filebrowser (`FB_*`), ttyd (CLI args), Tailscale (`TS_*`) KHONG doc prefix cua ta -> phai map o compose/entrypoint, khong dua vao trung ten (tranh silent-fail).
 - **Dung day du env ma moi dich vu cung cap**, khong bo sot. Moi env co **gia tri mac dinh hop ly**.
 - `.env.example` la nguon su that: **moi env co comment** giai thich tac dung, cach lay, va **liet ke day du gia tri enum** kem mac dinh.
-- **Path ben vung derive tu `${DOCKER_VOLUMES_DIR}`**, khong hardcode rieng le (tranh mat data khi doi thu muc volume).
+- **Default KHONG duoc la hang so dung chung.** `STACK_ID`, `DOCKFLARE_TUNNEL_NAME`, `RCLONE_PATH` phai derive theo ngu canh (vd `${GITHUB_REPOSITORY}`) hoac bat buoc user tu dat truoc khi bat module dung RTDB/remote chung. Copy nguyen `.env.example` ma quen doi -> 2 stack tranh lock / tunnel / ghi de volume cua nhau.
+- **Path ben vung derive tu `${DOCKER_VOLUMES_DIR}`**, khong hardcode rieng le.
+- **Phan biet container-path vs host-path.** Env nhu `FILEBROWSER_ROOT` la path *trong container* (-> `FB_ROOT`); bind `${DOCKER_VOLUMES_DIR}` vao container nam o compose `volumes:`, khong qua bien root.
 - Flag bat/tat dang `<SERVICE>_ENABLE` (mac dinh `false` cho module tuy chon).
 - Fallback **Base64 -> RAW** + validate theo ngu canh cho moi env.
 
@@ -51,12 +55,14 @@
 ## 6. Rule lifecycle / handover
 
 - Lien lac giua instance chi qua **RTDB** (lock/heartbeat/handoff).
+- **Namespace RTDB tach biet theo nghiep vu**, KHONG dung chung root: `/stack/<STACK_ID>/coordinator/...` (lock/heartbeat/handoff) va `/stack/<STACK_ID>/resolve-cache/...` (accountId, key pool). Tranh resolve ghi de nhanh lock cua coordinator.
 - **Atomic lock BAT BUOC:** ETag `if-match` hoac Firebase `runTransaction`, khong GET-roi-PUT (tranh split-brain). Fence token tang dan.
 - **Server timestamp:** dung `{".sv":"timestamp"}`, khong dung dong ho client.
 - **Con song thi read-only.** Chi 1 primary duoc ghi tai mot thoi diem.
+- **litestream so huu SQLite, rclone so huu phan con lai.** rclone BAT BUOC `--exclude` path `LITESTREAM_DB_PATH` + `-wal`/`-shm`. Khong de 2 module dung cung 1 file (tranh corrupt/snapshot lech).
 - **Watcher deadline:** handover o moc buffer truoc deadline, khong doi sat gio.
 - **Flush guard:** chi flush module dang bat, log ro khi skip.
-- Instance cu co option tu thoat khi cai moi ready.
+- Instance cu co option tu thoat khi cai moi ready. **Neu `COORDINATOR_OLD_AUTO_EXIT=false`:** instance cu read-only nhung khong thoat -> node Tailscale ephemeral van song, tich tu qua nhieu chu ky handover. Phai canh bao hoac gioi han so instance overlap toi da (`COORDINATOR_MAX_OVERLAP`).
 - Chung 1 Cloudflare tunnel, nhieu connector -> khong dut traffic khi chuyen.
 - Flush (rclone push + litestream) phai xong TRUOC khi nha lock.
 - Lock path derive theo `STACK_ID` de tranh dung do giua cac stack.
@@ -67,11 +73,13 @@
 - [ ] Khong co secret trong diff.
 - [ ] Log ro tung buoc, secret duoc mask.
 - [ ] Module moi co flag + profile + tu disable khi thieu env + bootstrap sinh COMPOSE_PROFILES.
+- [ ] Module bao mat: fail-closed khi thieu credential (khong fail-open).
 - [ ] Env noi bo da map tuong minh sang env that cua image.
-- [ ] Path derive tu `DOCKER_VOLUMES_DIR`, khong hardcode.
-- [ ] Coordinator dung ETag/transaction + server timestamp.
+- [ ] Path derive tu `DOCKER_VOLUMES_DIR`; default rieng (STACK_ID/TUNNEL_NAME/RCLONE_PATH) khong dung hang chung.
+- [ ] Coordinator dung ETag/transaction + server timestamp; namespace RTDB tach coordinator vs resolve-cache.
+- [ ] rclone exclude SQLite path cua litestream.
 - [ ] Thay doi moi truong chi nam trong `ci/`, khong dung core.
 
 ## 8. AGENT prompt (dan cho AI agent)
 
-> Ban dang lam tren **dockflarestack-template**. Triet ly: cau hinh hon code, code toi thieu, log ro. Toan bo script la Node `.mjs`, moi nghiep vu mot module trong thu muc rieng. KHONG commit secret, KHONG pha core, module tuy chon phai tu disable khi thieu env (graceful) va bootstrap.mjs phai sinh COMPOSE_PROFILES tu cac flag ENABLE. Moi env fallback Base64->RAW + validate theo ngu canh. Map tuong minh env noi bo -> env that cua image (FB_*, TS_*, ttyd CLI args). Path derive tu DOCKER_VOLUMES_DIR. Key trung thi health-check + fallback. Coordinator dung ETag/transaction + server timestamp + fence token; lien lac instance qua RTDB, con song thi read-only, chung 1 tunnel nhieu connector; watcher handover truoc deadline; flush guard theo flag. Truoc khi commit, kiem Definition of Done o muc 7.
+> Ban dang lam tren **dockflarestack-template**. Triet ly: cau hinh hon code, code toi thieu, log ro. Toan bo script la Node `.mjs`, moi nghiep vu mot module trong thu muc rieng. KHONG commit secret, KHONG pha core. Module thuong tu disable khi thieu env (fail-open); module bao mat (ttyd/dozzle expose/filebrowser) FAIL-CLOSED khi thieu credential. bootstrap.mjs sinh COMPOSE_PROFILES tu cac flag ENABLE (luon co core). Moi env fallback Base64->RAW + validate theo ngu canh. Map tuong minh env noi bo -> env that cua image (FB_*, TS_*, ttyd CLI args bang mang args). Path derive tu DOCKER_VOLUMES_DIR; STACK_ID/TUNNEL_NAME/RCLONE_PATH derive theo ngu canh, khong hang chung. Namespace RTDB tach coordinator vs resolve-cache. Coordinator dung ETag/transaction + server timestamp + fence token; con song thi read-only, chung 1 tunnel nhieu connector; watcher handover truoc deadline; flush guard theo flag; canh bao node tailscale tich tu khi AUTO_EXIT=false. litestream so huu SQLite, rclone --exclude path do + -wal/-shm. Key trung thi health-check + fallback. Truoc khi commit, kiem Definition of Done o muc 7.
