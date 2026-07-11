@@ -1,0 +1,7 @@
+{
+  "name": "dockflarestack-coordinator",
+  "type": "module",
+  "dependencies": {
+    "firebase-admin": "^14.1.0"
+  }
+}
