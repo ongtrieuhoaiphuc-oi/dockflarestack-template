@@ -2,7 +2,7 @@ name: deploy
 
 # Deploy that: bring up stack, expose service qua Cloudflare Tunnel theo DOMAIN.
 # Chay thu cong (workflow_dispatch). Can cau hinh GitHub Secrets (xem docs/10).
-# CACHE (dat o tang yml, KHONG trong code app): npm, docker buildx (gha), .docker-volumes.
+# CACHE (dat o tang yml): npm (~/.npm), docker buildx (gha), .docker-volumes.
 on:
   workflow_dispatch:
     inputs:
@@ -10,31 +10,43 @@ on:
         description: 'Module bat them (ngoai core), cach nhau dau phay. Vd: dozzle,filebrowser,ttyd'
         required: false
         default: 'dozzle,filebrowser,ttyd'
+      keep_alive_minutes:
+        description: 'So phut giu stack song (keep-alive) truoc khi job ket thuc. Toi da ~350 (job GH gioi han 6h).'
+        required: false
+        default: '50'
 
 jobs:
   deploy:
     name: Deploy stack qua Cloudflare Tunnel
     runs-on: ubuntu-latest
+    # Job GitHub-hosted toi da 6h. Timeout hoi lon hon keep-alive de step cleanup chay.
+    timeout-minutes: 360
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Setup Node (co cache npm)
-        uses: actions/setup-node@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '24'
+          package-manager-cache: false
 
       - name: Setup Buildx (cho docker layer cache)
         uses: docker/setup-buildx-action@v3
 
+      - name: Cache npm (~/.npm) theo hash package.json
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
       - name: Install deps
         run: npm install
 
-      # Cache .docker-volumes de warm-start (pull rclone se dong bo them, day chi la
-      # cache CI tang yml - KHONG thay the rclone). Key theo ngay de tranh phinh.
       - name: Cache .docker-volumes (warm-start)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .docker-volumes
           key: docker-volumes-${{ github.ref_name }}-${{ github.run_id }}
@@ -106,7 +118,7 @@ jobs:
           echo "== trang thai container =="
           docker compose --env-file .env.resolved -f core/docker-compose.yml ps
 
-      - name: Cho DockFlare tao tunnel + kiem tra service (retry)
+      - name: Cho DockFlare tao tunnel (retry)
         run: |
           echo "== cho DockFlare dang ky tunnel/DNS (toi da 90s) =="
           for i in $(seq 1 18); do
@@ -125,8 +137,42 @@ jobs:
           grep -q 'FILEBROWSER_ENABLE=true' .env.resolved && echo "Filebrowser  : https://${FILEBROWSER_HOSTNAME}" || true
           grep -q 'TTYD_ENABLE=true' .env.resolved && echo "ttyd/WebSSH  : https://${TTYD_HOSTNAME}" || true
 
-      - name: Thu tunnel (best-effort, khong fail job neu DNS chua propagate)
+      # ------------------------------------------------------------------
+      # KEEP-ALIVE: giu stack song de truy cap service qua tunnel.
+      # GitHub-hosted runner ephemeral -> khi step ket thuc, container tat,
+      # tunnel dong. Step nay loop heartbeat toi keep_alive_minutes phut,
+      # in trang thai container + thu tunnel dinh ky. Neu bat coordinator,
+      # day cung la khoang overlap de handover sang phien ke tiep.
+      # De chay BEN VUNG lau dai -> dung self-hosted runner (xem docs/10).
+      # ------------------------------------------------------------------
+      - name: Keep-alive (giu stack song)
+        env:
+          KEEP_MIN: ${{ github.event.inputs.keep_alive_minutes }}
         run: |
           set -a; . ./.env.resolved; set +a
-          echo "thu curl https://${DOCKFLARE_HOSTNAME} (co the chua propagate ngay)"
-          curl -sS -m 15 -o /dev/null -w "HTTP %{http_code}\n" "https://${DOCKFLARE_HOSTNAME}" || echo "chua truy cap duoc (DNS propagate hoac Access chan) - kiem tra thu cong"
+          MINUTES="${KEEP_MIN:-50}"
+          END=$(( $(date +%s) + MINUTES * 60 ))
+          echo "== keep-alive ${MINUTES} phut (toi $(date -u -d @${END} +%H:%M:%SZ)) =="
+          i=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            i=$((i+1))
+            echo "--- heartbeat #$i @ $(date -u +%H:%M:%SZ) ---"
+            docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' || true
+            # thu tunnel (best-effort)
+            curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://${DOCKFLARE_HOSTNAME}" 2>/dev/null || echo "tunnel chua san sang"
+            # neu container core chet -> thoat som de job do (bao loi)
+            if ! docker compose --env-file .env.resolved -f core/docker-compose.yml ps --status running --format '{{.Name}}' | grep -q dockflare; then
+              echo "[ERROR] DockFlare core khong con chay -> dung keep-alive"; exit 1
+            fi
+            sleep 60
+          done
+          echo "== het thoi gian keep-alive, chuan bi dong stack =="
+
+      - name: Flush + shutdown (cleanup)
+        if: always()
+        run: |
+          if [ -f .env.resolved ]; then
+            echo "== flush volume (neu rclone bat) + dong stack =="
+            docker compose --env-file .env.resolved -f core/docker-compose.yml logs --tail 30 || true
+            docker compose --env-file .env.resolved -f core/docker-compose.yml down || true
+          fi
