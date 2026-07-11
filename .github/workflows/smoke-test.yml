@@ -1,0 +1,110 @@
+name: smoke-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-and-unit:
+    name: Lint + Unit + Bootstrap smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Syntax check tat ca .mjs
+        run: |
+          echo "== kiem tra syntax cac file .mjs =="
+          for f in $(find scripts test services -name '*.mjs'); do
+            echo "  check $f"
+            node --check "$f"
+          done
+
+      - name: Smoke test (base64, readonly-guard, bootstrap)
+        run: node test/smoke.mjs
+
+      - name: Shellcheck entrypoints
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          echo "== shellcheck entrypoints =="
+          shellcheck services/rclone/entrypoint.sh services/ttyd/entrypoint.sh services/litestream/entrypoint.sh || true
+
+  compose-validate:
+    name: Validate docker-compose + profiles
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install
+
+      - name: Bootstrap voi env test (core only)
+        run: |
+          cat > .env <<'EOF'
+          STACK_ID=ci-smoke
+          DOCKER_VOLUMES_DIR=.docker-volumes
+          DOCKFLARE_CF_API_TOKEN=dummy
+          DOCKFLARE_CF_ACCOUNT_ID=dummy
+          DOCKFLARE_TUNNEL_NAME=${STACK_ID}
+          EOF
+          node scripts/bootstrap.mjs
+          echo "== .env.resolved =="
+          cat .env.resolved
+
+      - name: Validate compose config (core)
+        run: |
+          docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
+          echo "compose config core: OK"
+
+      - name: Bootstrap + validate (full profiles)
+        run: |
+          cat > .env <<'EOF'
+          STACK_ID=ci-smoke
+          DOCKER_VOLUMES_DIR=.docker-volumes
+          DOCKFLARE_CF_API_TOKEN=dummy
+          DOCKFLARE_TUNNEL_NAME=${STACK_ID}
+          COORDINATOR_ENABLE=true
+          RTDB_URL=https://x.firebaseio.com
+          RTDB_SERVICE_ACCOUNT=base64:e30=
+          COORDINATOR_READONLY_FLAG_PATH=.docker-volumes/.readonly
+          RCLONE_ENABLE=true
+          RCLONE_REMOTE=r
+          RCLONE_PATH=${STACK_ID}
+          LITESTREAM_ENABLE=true
+          LITESTREAM_DB_PATH=.docker-volumes/app.db
+          LITESTREAM_S3_ENDPOINT=https://s3.example
+          LITESTREAM_S3_BUCKET=b
+          LITESTREAM_S3_ACCESS_KEY_ID=k
+          LITESTREAM_S3_SECRET_ACCESS_KEY=s
+          DOZZLE_ENABLE=true
+          DOZZLE_PASSWORD=pw
+          FILEBROWSER_ENABLE=true
+          FILEBROWSER_ADMIN_PASSWORD=pw
+          TTYD_ENABLE=true
+          TTYD_CREDENTIAL=admin:secret
+          TAILSCALE_ENABLE=true
+          TAILSCALE_TAGS=tag:container
+          TS_AUTHKEY=dummy
+          EOF
+          node scripts/bootstrap.mjs
+          echo "== COMPOSE_PROFILES =="
+          grep COMPOSE_PROFILES .env.resolved
+          docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
+          echo "compose config full: OK"
