@@ -2,14 +2,12 @@
 # core/docker-compose.yml - DockFlareStack Template
 # ------------------------------------------------------------------------------
 # CACH CHAY (KHONG chay truc tiep file .env goc):
-#   node scripts/bootstrap.mjs            # resolve ${VAR} -> .env.resolved, sinh COMPOSE_PROFILES
-#   docker compose --env-file .env.resolved -f core/docker-compose.yml \
-#     $(cat .compose-profiles.args) up -d
-# bootstrap.mjs se set COMPOSE_PROFILES (vd: core,coordinator,rclone).
+#   node scripts/bootstrap.mjs            # resolve ${VAR} -> .env.resolved
+#   docker compose --env-file .env.resolved -f core/docker-compose.yml up -d
+# bootstrap.mjs set COMPOSE_PROFILES (vd: core,coordinator,rclone).
 #
-# Profiles (trung ten flag, khong prefix):
-#   core | coordinator | rclone | litestream | tailscale | dozzle | filebrowser | ttyd
-# Module core KHONG gan profile (luon chay). Module tuy chon gan profile rieng.
+# EXPOSE QUA DOMAIN: moi service co label dockflare.* -> DockFlare tu tao DNS +
+# tunnel ingress + Zero Trust Access theo hostname <sub>.<DOMAIN>.
 # ==============================================================================
 
 name: dockflarestack
@@ -24,10 +22,17 @@ services:
     environment:
       - CF_API_TOKEN=${DOCKFLARE_CF_API_TOKEN}
       - CF_ACCOUNT_ID=${DOCKFLARE_CF_ACCOUNT_ID}
+      - CF_DOMAIN=${DOMAIN}
       - TUNNEL_NAME=${DOCKFLARE_TUNNEL_NAME}
       - LOG_LEVEL=${DOCKFLARE_LOG_LEVEL:-info}
       - USE_REDIS=${DOCKFLARE_REDIS_ENABLE:-false}
       - REDIS_URL=${DOCKFLARE_REDIS_URL:-}
+    labels:
+      # DockFlare UI tu expose chinh no qua tunnel (neu co DOCKFLARE_HOSTNAME)
+      - "dockflare.enable=true"
+      - "dockflare.hostname=${DOCKFLARE_HOSTNAME}"
+      - "dockflare.service=http://dockflare:5000"
+      - "dockflare.access=${ACCESS_PROTECT:-true}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dockflare:/app/data
@@ -37,7 +42,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # Redis - chi chay khi bat (bootstrap ep bat khi COORDINATOR_ENABLE=true)
   redis:
     image: redis:7-alpine
     profiles: ["coordinator"]
@@ -47,7 +51,7 @@ services:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/redis:/data
 
   # --------------------------------------------------------------------------
-  # COORDINATOR - lifecycle handover (RTDB)
+  # COORDINATOR - lifecycle handover (RTDB) - noi bo, khong expose
   # --------------------------------------------------------------------------
   coordinator:
     build: ../services/coordinator
@@ -63,11 +67,13 @@ services:
       - COORDINATOR_OLD_AUTO_EXIT=${COORDINATOR_OLD_AUTO_EXIT:-false}
       - COORDINATOR_MAX_OVERLAP=${COORDINATOR_MAX_OVERLAP:-2}
       - COORDINATOR_READONLY_FLAG_PATH=${COORDINATOR_READONLY_FLAG_PATH}
+      - RCLONE_ENABLE=${RCLONE_ENABLE:-false}
+      - LITESTREAM_ENABLE=${LITESTREAM_ENABLE:-false}
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
 
   # --------------------------------------------------------------------------
-  # RCLONE - sync bulk .docker-volumes (exclude SQLite)
+  # RCLONE - sync bulk .docker-volumes (exclude SQLite) - noi bo
   # --------------------------------------------------------------------------
   rclone:
     build: ../services/rclone
@@ -83,14 +89,15 @@ services:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
 
   # --------------------------------------------------------------------------
-  # LITESTREAM - SQLite realtime -> S3 Supabase
+  # LITESTREAM - SQLite realtime -> S3 Supabase - noi bo
   # --------------------------------------------------------------------------
   litestream:
     image: litestream/litestream:latest
     profiles: ["litestream"]
     restart: unless-stopped
-    command: ["replicate"]
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     environment:
+      - LITESTREAM_DB_PATH=${LITESTREAM_DB_PATH}
       - LITESTREAM_S3_ENDPOINT=${LITESTREAM_S3_ENDPOINT}
       - LITESTREAM_S3_BUCKET=${LITESTREAM_S3_BUCKET}
       - LITESTREAM_S3_ACCESS_KEY_ID=${LITESTREAM_S3_ACCESS_KEY_ID}
@@ -98,9 +105,10 @@ services:
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
       - ../services/litestream/litestream.yml:/etc/litestream.yml:ro
+      - ../services/litestream/entrypoint.sh:/entrypoint.sh:ro
 
   # --------------------------------------------------------------------------
-  # TAILSCALE - mang noi bo (adapter OAuth -> TS_AUTHKEY)
+  # TAILSCALE - mang noi bo
   # --------------------------------------------------------------------------
   tailscale:
     image: tailscale/tailscale:latest
@@ -108,7 +116,6 @@ services:
     restart: unless-stopped
     hostname: ${STACK_ID}
     environment:
-      # TS_AUTHKEY duoc adapter (bootstrap) sinh tu OAuth client roi ghi vao .env.resolved
       - TS_AUTHKEY=${TS_AUTHKEY:-}
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
@@ -121,7 +128,7 @@ services:
       - net_admin
 
   # --------------------------------------------------------------------------
-  # DOZZLE - log viewer (module bao mat: simple auth can users.yml)
+  # DOZZLE - log viewer (expose qua tunnel theo DOZZLE_HOSTNAME)
   # --------------------------------------------------------------------------
   dozzle:
     image: amir20/dozzle:latest
@@ -133,13 +140,17 @@ services:
       - DOZZLE_AUTH_PROVIDER=${DOZZLE_AUTH_PROVIDER:-simple}
       - DOZZLE_LEVEL=${DOZZLE_LEVEL:-info}
       - DOZZLE_NO_ANALYTICS=${DOZZLE_NO_ANALYTICS:-1}
+    labels:
+      - "dockflare.enable=true"
+      - "dockflare.hostname=${DOZZLE_HOSTNAME}"
+      - "dockflare.service=http://dozzle:8080"
+      - "dockflare.access=${ACCESS_PROTECT:-true}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # users.yml sinh boi bootstrap (dozzle generate) - fail-closed neu thieu khi expose
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dozzle:/data
 
   # --------------------------------------------------------------------------
-  # FILEBROWSER - quan ly file volume (map FILEBROWSER_* -> FB_*)
+  # FILEBROWSER - quan ly file (expose qua tunnel theo FILEBROWSER_HOSTNAME)
   # --------------------------------------------------------------------------
   filebrowser:
     image: filebrowser/filebrowser:latest
@@ -151,14 +162,17 @@ services:
       - FB_ROOT=${FILEBROWSER_ROOT:-/srv}
       - FB_BASEURL=${FILEBROWSER_BASEURL:-}
       - FB_DATABASE=/database/filebrowser.db
+    labels:
+      - "dockflare.enable=true"
+      - "dockflare.hostname=${FILEBROWSER_HOSTNAME}"
+      - "dockflare.service=http://filebrowser:${FILEBROWSER_PORT:-8081}"
+      - "dockflare.access=${ACCESS_PROTECT:-true}"
     volumes:
-      # FB_ROOT la container-path; bind host o day
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/srv
-      # DB phai persist (tranh reset admin/admin khi restart)
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/filebrowser:/database
 
   # --------------------------------------------------------------------------
-  # TTYD / WebSSH - terminal web (entrypoint dung tokenizer, fail-closed neu thieu cred)
+  # TTYD / WebSSH (expose qua tunnel theo TTYD_HOSTNAME, luon bat Access)
   # --------------------------------------------------------------------------
   ttyd:
     build: ../services/ttyd
@@ -170,5 +184,9 @@ services:
       - TTYD_WRITABLE=${TTYD_WRITABLE:-true}
       - TTYD_CMD=${TTYD_CMD:-bash}
       - TTYD_MAX_CLIENTS=${TTYD_MAX_CLIENTS:-1}
-    ports:
-      - "${TTYD_PORT:-7681}:7681"
+    labels:
+      - "dockflare.enable=true"
+      - "dockflare.hostname=${TTYD_HOSTNAME}"
+      - "dockflare.service=http://ttyd:${TTYD_PORT:-7681}"
+      # ttyd LUON bat Access (khong bao gio public tran)
+      - "dockflare.access=true"
