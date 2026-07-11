@@ -59,10 +59,12 @@ jobs:
         run: |
           cat > .env <<'EOF'
           STACK_ID=ci-smoke
+          DOMAIN=ci.example.com
           DOCKER_VOLUMES_DIR=.docker-volumes
           DOCKFLARE_CF_API_TOKEN=dummy
           DOCKFLARE_CF_ACCOUNT_ID=dummy
           DOCKFLARE_TUNNEL_NAME=${STACK_ID}
+          DOCKFLARE_HOSTNAME=dockflare.${DOMAIN}
           EOF
           node scripts/bootstrap.mjs
           echo "== .env.resolved =="
@@ -77,9 +79,14 @@ jobs:
         run: |
           cat > .env <<'EOF'
           STACK_ID=ci-smoke
+          DOMAIN=ci.example.com
           DOCKER_VOLUMES_DIR=.docker-volumes
           DOCKFLARE_CF_API_TOKEN=dummy
           DOCKFLARE_TUNNEL_NAME=${STACK_ID}
+          DOCKFLARE_HOSTNAME=dockflare.${DOMAIN}
+          DOZZLE_HOSTNAME=logs.${DOMAIN}
+          FILEBROWSER_HOSTNAME=files.${DOMAIN}
+          TTYD_HOSTNAME=ssh.${DOMAIN}
           COORDINATOR_ENABLE=true
           RTDB_URL=https://x.firebaseio.com
           RTDB_SERVICE_ACCOUNT=base64:e30=
