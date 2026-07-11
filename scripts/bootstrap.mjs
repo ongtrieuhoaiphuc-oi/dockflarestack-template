@@ -2,7 +2,7 @@
 // bootstrap.mjs - LUON chay dau tien. Xu ly:
 //  1. Resolve ${VAR} long nhau (deterministic, nhieu pass) -> ghi .env.resolved
 //  2. Sinh COMPOSE_PROFILES tu cac <SERVICE>_ENABLE (luon kem 'core')
-//  3. Hard-block STACK_ID/DOMAIN=CHANGE_ME -> exit non-zero
+//  3. Hard-block STACK_ID/DOMAIN=CHANGE_ME/rong -> exit non-zero
 //  4. Derive RCLONE_EXCLUDE tu LITESTREAM_DB_PATH (+wal/shm, pattern **/<db>)
 //  5. Rang buoc: COORDINATOR_ENABLE=true -> ep DOCKFLARE_REDIS_ENABLE=true
 //  6. Fail-closed: module bao mat thieu credential -> exit non-zero
@@ -56,13 +56,18 @@ log.step(2, 'kiem tra STACK_ID va DOMAIN');
 const STACK_ID = E('STACK_ID');
 const usesShared = EB('COORDINATOR_ENABLE') || EB('RCLONE_ENABLE') || EB('LITESTREAM_ENABLE');
 if (usesShared && (!STACK_ID || STACK_ID === 'CHANGE_ME')) {
-  die('STACK_ID dang la CHANGE_ME/rong nhung co module dung RTDB/remote chung duoc bat. '
-    + 'Doi STACK_ID thanh gia tri duy nhat truoc khi tiep tuc.');
+  const why = !STACK_ID ? 'RONG (chua set GitHub Secret STACK_ID hoac thieu trong .env)' : 'con la CHANGE_ME';
+  die(`STACK_ID ${why} nhung co module dung RTDB/remote chung duoc bat. `
+    + 'Dat STACK_ID = gia tri duy nhat (vd dhstack-prod).');
 }
 const DOMAIN = E('DOMAIN');
 if (!DOMAIN || DOMAIN.includes('CHANGE_ME')) {
-  die('DOMAIN chua duoc cau hinh (dang CHANGE_ME). DOMAIN la BAT BUOC de expose service '
-    + 'qua Cloudflare Tunnel. Dat DOMAIN = domain ban da add vao Cloudflare (vd example.com).');
+  const why = !DOMAIN ? 'RONG (chua set GitHub Secret DOMAIN hoac thieu trong .env)' : 'con chua CHANGE_ME';
+  die(`DOMAIN ${why}. DOMAIN la BAT BUOC de expose service qua Cloudflare Tunnel. `
+    + 'Neu chay bang deploy.yml: vao repo > Settings > Secrets and variables > Actions, '
+    + 'them secret DOMAIN = domain ban da add vao Cloudflare (vd example.com). '
+    + 'LUU Y: deploy.yml tu tao .env tu GitHub Secrets, KHONG dung file .env ban commit '
+    + 'hay BOOTSTRAP_ENV_FILE - phai set qua Secrets.');
 }
 log.info(`STACK_ID=${STACK_ID} DOMAIN=${DOMAIN}`);
 
