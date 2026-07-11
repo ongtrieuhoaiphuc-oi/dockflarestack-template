@@ -1,0 +1,20 @@
+name: deploy-trigger
+
+on:
+  push:
+    branches: [deploy-run]
+    paths:
+      - .github/workflows/deploy-trigger.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch deploy on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --repo "$GITHUB_REPOSITORY" --ref main -f keep_alive_minutes=5
