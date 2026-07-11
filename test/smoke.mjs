@@ -1,5 +1,4 @@
 // smoke.mjs - smoke test khong can secret that. Chay trong CI + local.
-// Kiem: base64 marker, readonly-guard, bootstrap (profiles, hard-block, exclude, fail-closed).
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from 'node:fs';
@@ -12,6 +11,9 @@ function test(name, fn) {
 }
 function section(t) { console.log(`\n== ${t} ==`); }
 
+// Domain hop le dung chung cho cac case (DOMAIN gio la bat buoc).
+const DOM = 'DOMAIN=smoke.example.com\n';
+
 // ---- 1. base64 marker ----
 section('base64 marker');
 test('co prefix base64: -> decode', () => {
@@ -21,7 +23,6 @@ test('khong prefix -> RAW nguyen', () => {
   assert.equal(decodeMarker('ghp_abc123DEF'), 'ghp_abc123DEF');
 });
 test('token thuan (vo tinh hop le base64) KHONG bi decode nham', () => {
-  // 'YWJjZA==' la base64 hop le nhung khong co prefix -> phai giu nguyen
   assert.equal(decodeMarker('YWJjZA=='), 'YWJjZA==');
 });
 test('decodeJson parse duoc service account gia', () => {
@@ -66,7 +67,7 @@ function runBootstrap(envContent, expectFail = false) {
 }
 
 test('core-only: COMPOSE_PROFILES=core', () => {
-  runBootstrap('STACK_ID=smoke\nDOCKER_VOLUMES_DIR=.docker-volumes\nDOCKFLARE_TUNNEL_NAME=${STACK_ID}\n');
+  runBootstrap('STACK_ID=smoke\n' + DOM + 'DOCKER_VOLUMES_DIR=.docker-volumes\nDOCKFLARE_TUNNEL_NAME=${STACK_ID}\n');
   const resolved = readFileSync('.env.resolved', 'utf8');
   assert.match(resolved, /COMPOSE_PROFILES=core/);
 });
@@ -75,31 +76,40 @@ test('expand ${VAR}: TUNNEL_NAME = STACK_ID (khong con literal)', () => {
   assert.match(resolved, /DOCKFLARE_TUNNEL_NAME=smoke/);
   assert.doesNotMatch(resolved, /DOCKFLARE_TUNNEL_NAME=\$\{STACK_ID\}/);
 });
+test('expand hostname: DOZZLE_HOSTNAME = logs.smoke.example.com', () => {
+  runBootstrap('STACK_ID=smoke\n' + DOM + 'DOZZLE_SUBDOMAIN=logs\nDOZZLE_HOSTNAME=${DOZZLE_SUBDOMAIN}.${DOMAIN}\n');
+  const resolved = readFileSync('.env.resolved', 'utf8');
+  assert.match(resolved, /DOZZLE_HOSTNAME=logs\.smoke\.example\.com/);
+});
+test('hard-block: DOMAIN=CHANGE_ME -> fail', () => {
+  const out = runBootstrap('STACK_ID=smoke\nDOMAIN=CHANGE_ME.example.com\n', true);
+  assert.match(out, /DOMAIN/);
+});
 test('hard-block: STACK_ID=CHANGE_ME + coordinator -> fail', () => {
-  const out = runBootstrap('STACK_ID=CHANGE_ME\nCOORDINATOR_ENABLE=true\nRTDB_URL=x\nRTDB_SERVICE_ACCOUNT=x\n', true);
+  const out = runBootstrap('STACK_ID=CHANGE_ME\n' + DOM + 'COORDINATOR_ENABLE=true\nRTDB_URL=x\nRTDB_SERVICE_ACCOUNT=x\n', true);
   assert.match(out, /STACK_ID/);
 });
 test('redis coupling: coordinator=true -> redis auto on', () => {
-  runBootstrap('STACK_ID=smoke\nCOORDINATOR_ENABLE=true\nDOCKFLARE_REDIS_ENABLE=false\nRTDB_URL=x\nRTDB_SERVICE_ACCOUNT=x\nCOORDINATOR_READONLY_FLAG_PATH=.docker-volumes/.readonly\n');
+  runBootstrap('STACK_ID=smoke\n' + DOM + 'COORDINATOR_ENABLE=true\nDOCKFLARE_REDIS_ENABLE=false\nRTDB_URL=x\nRTDB_SERVICE_ACCOUNT=x\nCOORDINATOR_READONLY_FLAG_PATH=.docker-volumes/.readonly\n');
   const resolved = readFileSync('.env.resolved', 'utf8');
   assert.match(resolved, /DOCKFLARE_REDIS_ENABLE=true/);
   assert.match(resolved, /COMPOSE_PROFILES=core,coordinator/);
 });
 test('derive RCLONE_EXCLUDE tu LITESTREAM_DB_PATH', () => {
-  runBootstrap('STACK_ID=smoke\nDOCKER_VOLUMES_DIR=.docker-volumes\nRCLONE_ENABLE=true\nLITESTREAM_ENABLE=true\nLITESTREAM_DB_PATH=${DOCKER_VOLUMES_DIR}/mydb.sqlite\nRCLONE_REMOTE=r\nRCLONE_PATH=p\n');
+  runBootstrap('STACK_ID=smoke\n' + DOM + 'DOCKER_VOLUMES_DIR=.docker-volumes\nRCLONE_ENABLE=true\nLITESTREAM_ENABLE=true\nLITESTREAM_DB_PATH=${DOCKER_VOLUMES_DIR}/mydb.sqlite\nRCLONE_REMOTE=r\nRCLONE_PATH=p\n');
   const resolved = readFileSync('.env.resolved', 'utf8');
   assert.match(resolved, /RCLONE_EXCLUDE=\*\*\/mydb\.sqlite,\*\*\/mydb\.sqlite-wal,\*\*\/mydb\.sqlite-shm/);
 });
 test('fail-closed: ttyd enable + credential rong -> fail', () => {
-  const out = runBootstrap('STACK_ID=smoke\nTTYD_ENABLE=true\nTTYD_CREDENTIAL=\n', true);
+  const out = runBootstrap('STACK_ID=smoke\n' + DOM + 'TTYD_ENABLE=true\nTTYD_CREDENTIAL=\n', true);
   assert.match(out, /TTYD_CREDENTIAL/);
 });
 test('fail-closed: filebrowser enable + password rong -> fail', () => {
-  const out = runBootstrap('STACK_ID=smoke\nFILEBROWSER_ENABLE=true\nFILEBROWSER_ADMIN_PASSWORD=\n', true);
+  const out = runBootstrap('STACK_ID=smoke\n' + DOM + 'FILEBROWSER_ENABLE=true\nFILEBROWSER_ADMIN_PASSWORD=\n', true);
   assert.match(out, /FILEBROWSER_ADMIN_PASSWORD/);
 });
 test('module bao mat du credential -> pass + profile dung', () => {
-  runBootstrap('STACK_ID=smoke\nTTYD_ENABLE=true\nTTYD_CREDENTIAL=admin:secret\nDOZZLE_ENABLE=true\nDOZZLE_AUTH_PROVIDER=simple\nDOZZLE_PASSWORD=pw\n');
+  runBootstrap('STACK_ID=smoke\n' + DOM + 'TTYD_ENABLE=true\nTTYD_CREDENTIAL=admin:secret\nDOZZLE_ENABLE=true\nDOZZLE_AUTH_PROVIDER=simple\nDOZZLE_PASSWORD=pw\n');
   const resolved = readFileSync('.env.resolved', 'utf8');
   assert.match(resolved, /COMPOSE_PROFILES=core,dozzle,ttyd/);
 });
