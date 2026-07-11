@@ -1,199 +1,85 @@
 name: deploy
-
 on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: 'So phut giu stack song, 1-350.'
+        description: 'So phut giu stack song, 1-350'
         required: false
         default: '50'
-
-permissions:
-  contents: read
-
+permissions: { contents: read }
 jobs:
   deploy:
     name: Deploy stack qua Cloudflare Tunnel
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node 24
-        uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Cache npm (~/.npm) theo hash package.json
-        uses: actions/cache@v5
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
-
-      - name: Install deps
-        run: npm install
-
-      - name: Cache .docker-volumes (warm-start)
-        uses: actions/cache@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: '24', package-manager-cache: false }
+      - uses: docker/setup-buildx-action@v4
+      - uses: actions/cache@v5
+        with: { path: ~/.npm, key: "npm-${{ runner.os }}-${{ hashFiles('package.json') }}" }
+      - run: npm install
+      - uses: actions/cache@v5
         with:
           path: .docker-volumes
           key: docker-volumes-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            docker-volumes-${{ github.ref_name }}-
-            docker-volumes-
-
-      - name: Build service images (buildx + gha cache)
+          restore-keys: docker-volumes-${{ github.ref_name }}-
+      - name: Tao .env
+        env: { ENV_CONTENT: "${{ secrets.BOOTSTRAP_ENV_FILE }}" }
         run: |
-          set -euo pipefail
-          for svc in coordinator rclone ttyd litestream; do
-            if [ -f "services/$svc/Dockerfile" ]; then
-              echo "build $svc"
-              docker buildx build \
-                --cache-from type=gha,scope="$svc" \
-                --cache-to type=gha,mode=max,scope="$svc" \
-                --load -t "dockflarestack/$svc:deploy" "services/$svc"
-            fi
-          done
-
-      - name: Tao .env tu secret BOOTSTRAP_ENV_FILE
-        env:
-          ENV_CONTENT: ${{ secrets.BOOTSTRAP_ENV_FILE }}
-        run: |
-          set -euo pipefail
-          if [ -z "$ENV_CONTENT" ]; then
-            echo "[ERROR] Secret BOOTSTRAP_ENV_FILE rong."
-            exit 1
-          fi
+          test -n "$ENV_CONTENT" || { echo '[ERROR] BOOTSTRAP_ENV_FILE rong'; exit 1; }
           printf '%s\n' "$ENV_CONTENT" > .env
-          echo "da ghi .env tu secret ($(wc -l < .env) dong)"
-
-      - name: Bootstrap (resolve + validate + fail-closed)
-        run: |
-          node scripts/bootstrap.mjs
-          grep COMPOSE_PROFILES .env.resolved
-
-      - name: Pre-init credential cho service bao mat
+      - name: Bootstrap
+        run: node scripts/bootstrap.mjs
+      - name: Pre-init Dozzle + Filebrowser
         run: |
           set -euo pipefail
-          env_get() {
-            ENV_KEY="$1" node --input-type=module -e '
-              import { readFileSync } from "node:fs";
-              import dotenv from "dotenv";
-              const env = dotenv.parse(readFileSync(".env.resolved", "utf8"));
-              process.stdout.write(env[process.env.ENV_KEY] ?? "");
-            '
-          }
-
-          VOL="$(env_get DOCKER_VOLUMES_DIR)"
-          VOL="${VOL:-.docker-volumes}"
-          case "$VOL" in
-            /*) VOL_ABS="$VOL" ;;
-            *) VOL_ABS="$(pwd)/$VOL" ;;
-          esac
-          mkdir -p "$VOL_ABS/dockflare" "$VOL_ABS/dozzle" "$VOL_ABS/filebrowser" "$VOL_ABS/redis"
-
-          if [ "$(env_get DOZZLE_ENABLE)" = "true" ] && [ "$(env_get DOZZLE_AUTH_PROVIDER)" = "simple" ]; then
-            echo "== sinh dozzle users.yml =="
-            docker run --rm amir20/dozzle:latest generate \
-              "$(env_get DOZZLE_USERNAME)" \
-              --password "$(env_get DOZZLE_PASSWORD)" \
-              --name "$(env_get DOZZLE_USERNAME)" > "$VOL_ABS/dozzle/users.yml"
-            test -s "$VOL_ABS/dozzle/users.yml"
+          get(){ ENV_KEY="$1" node --input-type=module -e 'import fs from "node:fs";import dotenv from "dotenv";let e=dotenv.parse(fs.readFileSync(".env.resolved"));process.stdout.write(e[process.env.ENV_KEY]||"")'; }
+          VOL="$(get DOCKER_VOLUMES_DIR)"; mkdir -p "$VOL"/{dockflare,dozzle,filebrowser,redis}
+          if [ "$(get DOZZLE_ENABLE)" = true ] && [ "${DOZZLE_AUTH_PROVIDER:-$(get DOZZLE_AUTH_PROVIDER)}" = simple ]; then
+            docker run --rm amir20/dozzle:latest generate "$(get DOZZLE_USERNAME || true)" --password "$(get DOZZLE_PASSWORD)" --name "${DOZZLE_USERNAME:-admin}" > "$VOL/dozzle/users.yml"
+            test -s "$VOL/dozzle/users.yml"
           fi
-
-          if [ "$(env_get FILEBROWSER_ENABLE)" = "true" ]; then
-            echo "== init filebrowser DB + admin password =="
-            DB="$VOL_ABS/filebrowser/filebrowser.db"
-            sudo chown -R 1000:1000 "$VOL_ABS/filebrowser"
-            if [ ! -f "$DB" ]; then
-              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                config init --database /database/filebrowser.db
-              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                config set --database /database/filebrowser.db --address 0.0.0.0 \
-                --port "$(env_get FILEBROWSER_PORT)" --root "$(env_get FILEBROWSER_ROOT)"
-              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                users add admin "$(env_get FILEBROWSER_ADMIN_PASSWORD)" --database /database/filebrowser.db --perm.admin
+          if [ "$(get FILEBROWSER_ENABLE)" = true ]; then
+            sudo chown -R 1000:1000 "$VOL/filebrowser"
+            DB="$VOL/filebrowser/filebrowser.db"
+            if [ ! -s "$DB" ]; then
+              docker run --rm --user 1000:1000 -v "$VOL/filebrowser:/database" filebrowser/filebrowser:latest config init --database /database/filebrowser.db
+              docker run --rm --user 1000:1000 -v "$VOL/filebrowser:/database" filebrowser/filebrowser:latest users add admin "$(get FILEBROWSER_ADMIN_PASSWORD)" --database /database/filebrowser.db --perm.admin
             else
-              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                users update admin --password "$(env_get FILEBROWSER_ADMIN_PASSWORD)" --database /database/filebrowser.db
+              docker run --rm --user 1000:1000 -v "$VOL/filebrowser:/database" filebrowser/filebrowser:latest users update admin --password "$(get FILEBROWSER_ADMIN_PASSWORD)" --database /database/filebrowser.db
             fi
             test -s "$DB"
           fi
-
-      - name: Validate compose config
-        run: docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
-
-      - name: Bring up stack
+      - name: Validate + up
         run: |
-          docker compose --env-file .env.resolved -f core/docker-compose.yml up -d --build
-          docker compose --env-file .env.resolved -f core/docker-compose.yml ps
-
-      - name: Cho DockFlare tao tunnel (retry)
-        run: |
-          for _ in $(seq 1 18); do
-            if docker compose --env-file .env.resolved -f core/docker-compose.yml logs dockflare 2>&1 | grep -qi 'tunnel'; then
-              echo "DockFlare da xu ly tunnel"
-              break
-            fi
-            sleep 5
-          done
-          docker compose --env-file .env.resolved -f core/docker-compose.yml ps
-
-      - name: In cac URL service da expose
-        run: |
-          node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            import dotenv from "dotenv";
-            const e = dotenv.parse(readFileSync(".env.resolved", "utf8"));
-            console.log(`DockFlare UI : https://${e.DOCKFLARE_HOSTNAME}`);
-            if (e.DOZZLE_ENABLE === "true") console.log(`Dozzle       : https://${e.DOZZLE_HOSTNAME}`);
-            if (e.FILEBROWSER_ENABLE === "true") console.log(`Filebrowser  : https://${e.FILEBROWSER_HOSTNAME}`);
-            if (e.TTYD_ENABLE === "true") console.log(`ttyd/WebSSH  : https://${e.TTYD_HOSTNAME}`);
-          '
-
-      - name: Keep-alive + canh bao container crash-loop
-        env:
-          KEEP_MIN: ${{ github.event.inputs.keep_alive_minutes }}
+          docker compose --project-directory . --env-file .env.resolved -f core/docker-compose.yml config >/dev/null
+          docker compose --project-directory . --env-file .env.resolved -f core/docker-compose.yml up -d --build
+      - name: Runtime health gate
         run: |
           set -euo pipefail
-          case "$KEEP_MIN" in
-            ''|*[!0-9]*) echo "[ERROR] keep_alive_minutes phai la so 1-350"; exit 1 ;;
-          esac
-          if [ "$KEEP_MIN" -lt 1 ] || [ "$KEEP_MIN" -gt 350 ]; then
-            echo "[ERROR] keep_alive_minutes phai nam trong 1-350"
-            exit 1
-          fi
-          HOST="$(node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            import dotenv from "dotenv";
-            process.stdout.write(dotenv.parse(readFileSync(".env.resolved", "utf8")).DOCKFLARE_HOSTNAME ?? "");
-          ')"
-          END=$(( $(date +%s) + KEEP_MIN * 60 ))
+          for i in $(seq 1 18); do
+            bad=$(docker compose --project-directory . --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' | awk '$2=="restarting" || $2=="exited"{print $1}')
+            [ -z "$bad" ] && break
+            [ "$i" -lt 18 ] || { for c in $bad; do docker logs --tail 50 "$c" 2>&1; done; exit 1; }
+            sleep 5
+          done
+          docker compose --project-directory . --env-file .env.resolved -f core/docker-compose.yml ps
+      - name: Keep-alive
+        env: { KEEP_MIN: "${{ github.event.inputs.keep_alive_minutes }}" }
+        run: |
+          set -euo pipefail
+          case "$KEEP_MIN" in ''|*[!0-9]*) exit 1;; esac
+          [ "$KEEP_MIN" -ge 1 ] && [ "$KEEP_MIN" -le 350 ] || exit 1
+          HOST=$(ENV_KEY=DOCKFLARE_HOSTNAME node --input-type=module -e 'import fs from "node:fs";import dotenv from "dotenv";process.stdout.write(dotenv.parse(fs.readFileSync(".env.resolved"))[process.env.ENV_KEY])')
+          END=$(( $(date +%s)+KEEP_MIN*60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
-            docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' || true
-            for c in $(docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' | awk '$2=="restarting"{print $1}'); do
-              echo "!! $c dang restart"
-              docker logs --tail 15 "$c" 2>&1 | sed 's/^/  /' || true
-            done
-            curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://$HOST" || echo "tunnel chua san sang"
-            if ! docker compose --env-file .env.resolved -f core/docker-compose.yml ps --status running --format '{{.Name}}' | grep -q dockflare; then
-              echo "[ERROR] DockFlare core khong con chay"
-              exit 1
-            fi
+            bad=$(docker compose --project-directory . --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' | awk '$2=="restarting" || $2=="exited"{print $1}')
+            if [ -n "$bad" ]; then for c in $bad; do docker logs --tail 50 "$c" 2>&1; done; exit 1; fi
+            curl -fsS -m 10 "https://$HOST" >/dev/null || true
             sleep 60
           done
-
-      - name: Flush + shutdown (cleanup)
+      - name: Cleanup
         if: always()
-        run: |
-          if [ -f .env.resolved ]; then
-            docker compose --env-file .env.resolved -f core/docker-compose.yml logs --tail 30 || true
-            docker compose --env-file .env.resolved -f core/docker-compose.yml down || true
-          fi
+        run: docker compose --project-directory . --env-file .env.resolved -f core/docker-compose.yml down || true
