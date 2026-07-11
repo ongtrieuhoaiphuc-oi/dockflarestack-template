@@ -2,6 +2,7 @@ name: deploy
 
 # Deploy that: bring up stack, expose service qua Cloudflare Tunnel theo DOMAIN.
 # Chay thu cong (workflow_dispatch). Can cau hinh GitHub Secrets (xem docs/10).
+# CACHE (dat o tang yml, KHONG trong code app): npm, docker buildx (gha), .docker-volumes.
 on:
   workflow_dispatch:
     inputs:
@@ -18,13 +19,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node (co cache npm)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Buildx (cho docker layer cache)
+        uses: docker/setup-buildx-action@v3
 
       - name: Install deps
         run: npm install
+
+      # Cache .docker-volumes de warm-start (pull rclone se dong bo them, day chi la
+      # cache CI tang yml - KHONG thay the rclone). Key theo ngay de tranh phinh.
+      - name: Cache .docker-volumes (warm-start)
+        uses: actions/cache@v4
+        with:
+          path: .docker-volumes
+          key: docker-volumes-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            docker-volumes-${{ github.ref_name }}-
+            docker-volumes-
+
+      - name: Build service images (buildx + gha cache)
+        run: |
+          echo "== build service co Dockerfile voi cache gha =="
+          for svc in coordinator rclone ttyd; do
+            if [ -f "services/$svc/Dockerfile" ]; then
+              echo "  build $svc"
+              docker buildx build \
+                --cache-from type=gha,scope=$svc \
+                --cache-to type=gha,mode=max,scope=$svc \
+                --load -t dockflarestack/$svc:deploy "services/$svc"
+            fi
+          done
 
       - name: Tao .env tu GitHub Secrets
         env:
@@ -55,7 +84,6 @@ jobs:
             echo "ACCESS_ALLOWED_EMAILS=${ACCESS_ALLOWED_EMAILS}"
             echo "RTDB_URL=${RTDB_URL}"
             echo "RTDB_SERVICE_ACCOUNT=base64:${RTDB_SA_B64}"
-            # bat module theo input
             case ",${ENABLED_PROFILES}," in *,dozzle,*) echo "DOZZLE_ENABLE=true"; echo "DOZZLE_PASSWORD=${DOZZLE_PASSWORD}";; esac
             case ",${ENABLED_PROFILES}," in *,filebrowser,*) echo "FILEBROWSER_ENABLE=true"; echo "FILEBROWSER_ADMIN_PASSWORD=${FILEBROWSER_ADMIN_PASSWORD}";; esac
             case ",${ENABLED_PROFILES}," in *,ttyd,*) echo "TTYD_ENABLE=true"; echo "TTYD_CREDENTIAL=${TTYD_CREDENTIAL}";; esac
@@ -93,7 +121,7 @@ jobs:
         run: |
           set -a; . ./.env.resolved; set +a
           echo "DockFlare UI : https://${DOCKFLARE_HOSTNAME}"
-          [ -n "${DOZZLE_HOSTNAME:-}" ] && grep -q 'DOZZLE_ENABLE=true' .env.resolved && echo "Dozzle       : https://${DOZZLE_HOSTNAME}" || true
+          grep -q 'DOZZLE_ENABLE=true' .env.resolved && echo "Dozzle       : https://${DOZZLE_HOSTNAME}" || true
           grep -q 'FILEBROWSER_ENABLE=true' .env.resolved && echo "Filebrowser  : https://${FILEBROWSER_HOSTNAME}" || true
           grep -q 'TTYD_ENABLE=true' .env.resolved && echo "ttyd/WebSSH  : https://${TTYD_HOSTNAME}" || true
 
