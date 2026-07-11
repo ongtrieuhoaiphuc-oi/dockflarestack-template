@@ -13,13 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Setup Node (co cache npm)
-        uses: actions/setup-node@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '24'
+          # Repo chua co package-lock.json -> tat auto cache cua setup-node
+          # (tranh loi 'Dependencies lock file is not found'). Cache thu cong o duoi.
+          package-manager-cache: false
+
+      - name: Cache npm (~/.npm) theo hash package.json
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
 
       - name: Install deps
         run: npm install
@@ -36,7 +46,7 @@ jobs:
         run: node test/smoke.mjs
 
       - name: Cache apt (shellcheck)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /var/cache/apt/archives
           key: apt-shellcheck-${{ runner.os }}
@@ -52,13 +62,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Setup Node (co cache npm)
-        uses: actions/setup-node@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Cache npm (~/.npm) theo hash package.json
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
 
       - name: Install deps
         run: npm install
@@ -129,13 +147,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build tung service co Dockerfile, dung cache type=gha (mode=max).
-      # Lan 2 build se hit cache -> nhanh hon ro (log 'CACHED').
       - name: Build coordinator (cache gha)
         uses: docker/build-push-action@v6
         with:
