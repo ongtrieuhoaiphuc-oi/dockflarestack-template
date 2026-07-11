@@ -5,15 +5,12 @@ name: deploy
 #
 # CAU HINH SECRET: luu TOAN BO noi dung file .env vao 1 GitHub Secret ten
 #   BOOTSTRAP_ENV_FILE
-# (repo > Settings > Secrets and variables > Actions > New repository secret).
-# Workflow se ghi noi dung nay ra file .env roi chay bootstrap.
-#
-# CACHE (dat o tang yml): npm (~/.npm), docker buildx (gha), .docker-volumes.
+# Workflow ghi noi dung nay ra file .env roi chay bootstrap.
 on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: 'So phut giu stack song (keep-alive) truoc khi job ket thuc. Toi da ~350 (job GH gioi han 6h).'
+        description: 'So phut giu stack song (keep-alive). Toi da ~350 (job GH gioi han 6h).'
         required: false
         default: '50'
 
@@ -32,7 +29,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Setup Buildx (cho docker layer cache)
+      - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Cache npm (~/.npm) theo hash package.json
@@ -58,7 +55,7 @@ jobs:
       - name: Build service images (buildx + gha cache)
         run: |
           echo "== build service co Dockerfile voi cache gha =="
-          for svc in coordinator rclone ttyd; do
+          for svc in coordinator rclone ttyd litestream; do
             if [ -f "services/$svc/Dockerfile" ]; then
               echo "  build $svc"
               docker buildx build \
@@ -74,18 +71,52 @@ jobs:
         run: |
           set -e
           if [ -z "$ENV_CONTENT" ]; then
-            echo "[ERROR] Secret BOOTSTRAP_ENV_FILE rong. Luu toan bo noi dung file .env"
-            echo "        vao GitHub Secret ten BOOTSTRAP_ENV_FILE truoc khi chay."
+            echo "[ERROR] Secret BOOTSTRAP_ENV_FILE rong. Luu toan bo noi dung file .env vao secret nay."
             exit 1
           fi
           printf '%s\n' "$ENV_CONTENT" > .env
-          echo "da ghi .env tu secret BOOTSTRAP_ENV_FILE ($(wc -l < .env) dong, khong in noi dung vi chua secret)"
+          echo "da ghi .env tu secret ($(wc -l < .env) dong)"
 
       - name: Bootstrap (resolve + validate + fail-closed)
         run: |
           node scripts/bootstrap.mjs
           echo "== profiles =="
           grep COMPOSE_PROFILES .env.resolved
+
+      - name: Pre-init credential cho service bao mat (tranh crash-loop)
+        run: |
+          set -a; . ./.env.resolved; set +a
+          VOL="${DOCKER_VOLUMES_DIR:-.docker-volumes}"
+          mkdir -p "$VOL/dockflare" "$VOL/dozzle" "$VOL/filebrowser" "$VOL/redis"
+
+          # --- Dozzle: sinh users.yml bang chinh binary dozzle (dung format) ---
+          if grep -q 'DOZZLE_ENABLE=true' .env.resolved && [ "${DOZZLE_AUTH_PROVIDER:-simple}" = "simple" ]; then
+            echo "== sinh dozzle users.yml =="
+            docker run --rm amir20/dozzle:latest generate \
+              "${DOZZLE_USERNAME:-admin}" \
+              --password "${DOZZLE_PASSWORD}" \
+              --name "${DOZZLE_USERNAME:-admin}" > "$VOL/dozzle/users.yml"
+            echo "da tao $VOL/dozzle/users.yml ($(wc -l < "$VOL/dozzle/users.yml") dong)"
+          fi
+
+          # --- Filebrowser: config init + set admin password (DB phai co truoc khi start) ---
+          if grep -q 'FILEBROWSER_ENABLE=true' .env.resolved; then
+            echo "== init filebrowser DB + admin password =="
+            DB="$VOL/filebrowser/filebrowser.db"
+            if [ ! -f "$DB" ]; then
+              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
+                config init --database /database/filebrowser.db
+              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
+                config set --database /database/filebrowser.db --address 0.0.0.0 --port "${FILEBROWSER_PORT:-8081}" --root "${FILEBROWSER_ROOT:-/srv}"
+              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
+                users add admin "${FILEBROWSER_ADMIN_PASSWORD}" --database /database/filebrowser.db --perm.admin || \
+              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
+                users update admin --password "${FILEBROWSER_ADMIN_PASSWORD}" --database /database/filebrowser.db
+              echo "da init filebrowser DB + set admin password"
+            else
+              echo "filebrowser DB da ton tai, bo qua init"
+            fi
+          fi
 
       - name: Validate compose config
         run: docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
@@ -116,37 +147,35 @@ jobs:
           grep -q 'FILEBROWSER_ENABLE=true' .env.resolved && echo "Filebrowser  : https://${FILEBROWSER_HOSTNAME}" || true
           grep -q 'TTYD_ENABLE=true' .env.resolved && echo "ttyd/WebSSH  : https://${TTYD_HOSTNAME}" || true
 
-      # ------------------------------------------------------------------
-      # KEEP-ALIVE: giu stack song de truy cap service qua tunnel.
-      # GitHub-hosted runner ephemeral -> khi step ket thuc, container tat.
-      # De chay BEN VUNG lau dai -> dung self-hosted runner (xem docs/10).
-      # ------------------------------------------------------------------
-      - name: Keep-alive (giu stack song)
+      - name: Keep-alive (giu stack song) + canh bao container crash-loop
         env:
           KEEP_MIN: ${{ github.event.inputs.keep_alive_minutes }}
         run: |
           set -a; . ./.env.resolved; set +a
           MINUTES="${KEEP_MIN:-50}"
           END=$(( $(date +%s) + MINUTES * 60 ))
-          echo "== keep-alive ${MINUTES} phut (toi $(date -u -d @${END} +%H:%M:%SZ)) =="
+          echo "== keep-alive ${MINUTES} phut =="
           i=0
           while [ "$(date +%s)" -lt "$END" ]; do
             i=$((i+1))
             echo "--- heartbeat #$i @ $(date -u +%H:%M:%SZ) ---"
             docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' || true
+            # In log 15 dong cuoi cua container dang restart de de chan doan
+            for c in $(docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' | awk '$2=="restarting"{print $1}'); do
+              echo "  !! $c dang restart, log cuoi:"
+              docker logs --tail 15 "$c" 2>&1 | sed 's/^/     /' || true
+            done
             curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://${DOCKFLARE_HOSTNAME}" 2>/dev/null || echo "tunnel chua san sang"
             if ! docker compose --env-file .env.resolved -f core/docker-compose.yml ps --status running --format '{{.Name}}' | grep -q dockflare; then
               echo "[ERROR] DockFlare core khong con chay -> dung keep-alive"; exit 1
             fi
             sleep 60
           done
-          echo "== het thoi gian keep-alive, chuan bi dong stack =="
 
       - name: Flush + shutdown (cleanup)
         if: always()
         run: |
           if [ -f .env.resolved ]; then
-            echo "== flush volume (neu rclone bat) + dong stack =="
             docker compose --env-file .env.resolved -f core/docker-compose.yml logs --tail 30 || true
             docker compose --env-file .env.resolved -f core/docker-compose.yml down || true
           fi
