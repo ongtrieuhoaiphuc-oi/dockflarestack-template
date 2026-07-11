@@ -60,7 +60,7 @@ function runBootstrap(envContent, expectFail = false) {
     if (expectFail) throw new Error('mong doi exit non-zero nhung lai thanh cong');
     return out;
   } catch (e) {
-    if (expectFail) return e.stdout || e.message;
+    if (expectFail) return `${e.stdout || ''}${e.stderr || ''}${e.message || ''}`;
     throw e;
   }
 }
