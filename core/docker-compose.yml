@@ -1,0 +1,174 @@
+# ==============================================================================
+# core/docker-compose.yml - DockFlareStack Template
+# ------------------------------------------------------------------------------
+# CACH CHAY (KHONG chay truc tiep file .env goc):
+#   node scripts/bootstrap.mjs            # resolve ${VAR} -> .env.resolved, sinh COMPOSE_PROFILES
+#   docker compose --env-file .env.resolved -f core/docker-compose.yml \
+#     $(cat .compose-profiles.args) up -d
+# bootstrap.mjs se set COMPOSE_PROFILES (vd: core,coordinator,rclone).
+#
+# Profiles (trung ten flag, khong prefix):
+#   core | coordinator | rclone | litestream | tailscale | dozzle | filebrowser | ttyd
+# Module core KHONG gan profile (luon chay). Module tuy chon gan profile rieng.
+# ==============================================================================
+
+name: dockflarestack
+
+services:
+  # --------------------------------------------------------------------------
+  # CORE - DockFlare master (luon chay, khong profile)
+  # --------------------------------------------------------------------------
+  dockflare:
+    image: alplat/dockflare:latest
+    restart: unless-stopped
+    environment:
+      - CF_API_TOKEN=${DOCKFLARE_CF_API_TOKEN}
+      - CF_ACCOUNT_ID=${DOCKFLARE_CF_ACCOUNT_ID}
+      - TUNNEL_NAME=${DOCKFLARE_TUNNEL_NAME}
+      - LOG_LEVEL=${DOCKFLARE_LOG_LEVEL:-info}
+      - USE_REDIS=${DOCKFLARE_REDIS_ENABLE:-false}
+      - REDIS_URL=${DOCKFLARE_REDIS_URL:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dockflare:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Redis - chi chay khi bat (bootstrap ep bat khi COORDINATOR_ENABLE=true)
+  redis:
+    image: redis:7-alpine
+    profiles: ["coordinator"]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/redis:/data
+
+  # --------------------------------------------------------------------------
+  # COORDINATOR - lifecycle handover (RTDB)
+  # --------------------------------------------------------------------------
+  coordinator:
+    build: ../services/coordinator
+    profiles: ["coordinator"]
+    restart: unless-stopped
+    environment:
+      - RTDB_URL=${RTDB_URL}
+      - RTDB_SERVICE_ACCOUNT=${RTDB_SERVICE_ACCOUNT}
+      - COORDINATOR_LOCK_PATH=${COORDINATOR_LOCK_PATH}
+      - COORDINATOR_HEARTBEAT_SEC=${COORDINATOR_HEARTBEAT_SEC:-15}
+      - COORDINATOR_SESSION_TTL_SEC=${COORDINATOR_SESSION_TTL_SEC:-60}
+      - COORDINATOR_HANDOVER_BUFFER_SEC=${COORDINATOR_HANDOVER_BUFFER_SEC:-600}
+      - COORDINATOR_OLD_AUTO_EXIT=${COORDINATOR_OLD_AUTO_EXIT:-false}
+      - COORDINATOR_MAX_OVERLAP=${COORDINATOR_MAX_OVERLAP:-2}
+      - COORDINATOR_READONLY_FLAG_PATH=${COORDINATOR_READONLY_FLAG_PATH}
+    volumes:
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
+
+  # --------------------------------------------------------------------------
+  # RCLONE - sync bulk .docker-volumes (exclude SQLite)
+  # --------------------------------------------------------------------------
+  rclone:
+    build: ../services/rclone
+    profiles: ["rclone"]
+    restart: on-failure
+    environment:
+      - RCLONE_REMOTE=${RCLONE_REMOTE}
+      - RCLONE_PATH=${RCLONE_PATH}
+      - RCLONE_TRANSFERS=${RCLONE_TRANSFERS:-4}
+      - RCLONE_CHECKERS=${RCLONE_CHECKERS:-4}
+      - RCLONE_EXCLUDE=${RCLONE_EXCLUDE}
+    volumes:
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
+
+  # --------------------------------------------------------------------------
+  # LITESTREAM - SQLite realtime -> S3 Supabase
+  # --------------------------------------------------------------------------
+  litestream:
+    image: litestream/litestream:latest
+    profiles: ["litestream"]
+    restart: unless-stopped
+    command: ["replicate"]
+    environment:
+      - LITESTREAM_S3_ENDPOINT=${LITESTREAM_S3_ENDPOINT}
+      - LITESTREAM_S3_BUCKET=${LITESTREAM_S3_BUCKET}
+      - LITESTREAM_S3_ACCESS_KEY_ID=${LITESTREAM_S3_ACCESS_KEY_ID}
+      - LITESTREAM_S3_SECRET_ACCESS_KEY=${LITESTREAM_S3_SECRET_ACCESS_KEY}
+    volumes:
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
+      - ../services/litestream/litestream.yml:/etc/litestream.yml:ro
+
+  # --------------------------------------------------------------------------
+  # TAILSCALE - mang noi bo (adapter OAuth -> TS_AUTHKEY)
+  # --------------------------------------------------------------------------
+  tailscale:
+    image: tailscale/tailscale:latest
+    profiles: ["tailscale"]
+    restart: unless-stopped
+    hostname: ${STACK_ID}
+    environment:
+      # TS_AUTHKEY duoc adapter (bootstrap) sinh tu OAuth client roi ghi vao .env.resolved
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_EXTRA_ARGS=--advertise-tags=${TAILSCALE_TAGS}
+    volumes:
+      - ${TAILSCALE_STATE_DIR:-.docker-volumes/tailscale}:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+
+  # --------------------------------------------------------------------------
+  # DOZZLE - log viewer (module bao mat: simple auth can users.yml)
+  # --------------------------------------------------------------------------
+  dozzle:
+    image: amir20/dozzle:latest
+    profiles: ["dozzle"]
+    restart: unless-stopped
+    environment:
+      - DOZZLE_ADDR=${DOZZLE_ADDR:-:8080}
+      - DOZZLE_BASE=${DOZZLE_BASE:-/}
+      - DOZZLE_AUTH_PROVIDER=${DOZZLE_AUTH_PROVIDER:-simple}
+      - DOZZLE_LEVEL=${DOZZLE_LEVEL:-info}
+      - DOZZLE_NO_ANALYTICS=${DOZZLE_NO_ANALYTICS:-1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # users.yml sinh boi bootstrap (dozzle generate) - fail-closed neu thieu khi expose
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dozzle:/data
+
+  # --------------------------------------------------------------------------
+  # FILEBROWSER - quan ly file volume (map FILEBROWSER_* -> FB_*)
+  # --------------------------------------------------------------------------
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    profiles: ["filebrowser"]
+    restart: unless-stopped
+    environment:
+      # QUAN TRONG: image doc FB_*, map tuong minh tu FILEBROWSER_*
+      - FB_PORT=${FILEBROWSER_PORT:-8081}
+      - FB_ROOT=${FILEBROWSER_ROOT:-/srv}
+      - FB_BASEURL=${FILEBROWSER_BASEURL:-}
+      - FB_DATABASE=/database/filebrowser.db
+    volumes:
+      # FB_ROOT la container-path; bind host o day
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/srv
+      # DB phai persist (tranh reset admin/admin khi restart)
+      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/filebrowser:/database
+
+  # --------------------------------------------------------------------------
+  # TTYD / WebSSH - terminal web (entrypoint dung tokenizer, fail-closed neu thieu cred)
+  # --------------------------------------------------------------------------
+  ttyd:
+    build: ../services/ttyd
+    profiles: ["ttyd"]
+    restart: unless-stopped
+    environment:
+      - TTYD_PORT=${TTYD_PORT:-7681}
+      - TTYD_CREDENTIAL=${TTYD_CREDENTIAL}
+      - TTYD_WRITABLE=${TTYD_WRITABLE:-true}
+      - TTYD_CMD=${TTYD_CMD:-bash}
+      - TTYD_MAX_CLIENTS=${TTYD_MAX_CLIENTS:-1}
+    ports:
+      - "${TTYD_PORT:-7681}:7681"

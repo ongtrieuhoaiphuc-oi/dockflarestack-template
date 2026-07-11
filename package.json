@@ -1,0 +1,19 @@
+{
+  "name": "dockflarestack-template",
+  "version": "0.1.0",
+  "description": "Template deploy da app tren Cloudflare Tunnel (DockFlare) + cac module tuy chon: coordinator (RTDB), rclone, litestream, tailscale, dozzle, filebrowser, ttyd.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "resolve": "node scripts/resolve/index.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^17.0.0",
+    "dotenv-expand": "^13.0.0",
+    "firebase-admin": "^14.1.0",
+    "string-argv": "^0.3.2"
+  }
+}
