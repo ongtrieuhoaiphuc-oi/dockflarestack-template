@@ -16,44 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node 24
-        uses: actions/setup-node@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           package-manager-cache: false
-
-      - name: Cache npm (~/.npm) theo hash package.json
-        uses: actions/cache@v5
+      - uses: actions/cache@v5
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
-
-      - name: Install deps
-        run: npm install
-
-      - name: Syntax check tat ca .mjs
-        run: |
-          echo "== kiem tra syntax cac file .mjs =="
-          find scripts test services -name '*.mjs' -print0 | while IFS= read -r -d '' f; do
-            echo "  check $f"
-            node --check "$f"
-          done
-
-      - name: Smoke test (base64, readonly-guard, bootstrap)
+          restore-keys: npm-${{ runner.os }}-
+      - run: npm install
+      - name: Syntax check
+        run: find scripts test services -name '*.mjs' -print0 | while IFS= read -r -d '' f; do node --check "$f"; done
+      - name: Smoke test
         run: node test/smoke.mjs
-
-      - name: Cache apt (shellcheck)
-        uses: actions/cache@v5
-        with:
-          path: /var/cache/apt/archives
-          key: apt-shellcheck-${{ runner.os }}
-
-      - name: Shellcheck entrypoints
+      - name: Shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
           shellcheck services/rclone/entrypoint.sh services/ttyd/entrypoint.sh services/litestream/entrypoint.sh
@@ -63,67 +41,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node 24
-        uses: actions/setup-node@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           package-manager-cache: false
-
-      - name: Cache npm (~/.npm) theo hash package.json
-        uses: actions/cache@v5
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
-
-      - name: Install deps
-        run: npm install
-
-      - name: Bootstrap voi env test (core only)
+      - run: npm install
+      - name: Bootstrap core + validate
         run: |
           cat > .env <<'EOF'
           STACK_ID=ci-smoke
           DOMAIN=ci.example.com
           DOCKER_VOLUMES_DIR=.docker-volumes
-          DOCKFLARE_CF_API_TOKEN=dummy
-          DOCKFLARE_CF_ACCOUNT_ID=dummy
+          DOCKFLARE_CF_API_TOKEN=dummy-token
+          DOCKFLARE_CF_ACCOUNT_ID=dummy-account
+          DOCKFLARE_CF_ZONE_ID=dummy-zone
           DOCKFLARE_TUNNEL_NAME=${STACK_ID}
           DOCKFLARE_HOSTNAME=dockflare.${DOMAIN}
           EOF
           node scripts/bootstrap.mjs
-
-      - name: Validate compose config (core)
-        run: docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
-
-      - name: Bootstrap + validate (full profiles)
+          docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
+      - name: Bootstrap full profiles + validate
         run: |
-          cat > .env <<'EOF'
-          STACK_ID=ci-smoke
-          DOMAIN=ci.example.com
-          DOCKER_VOLUMES_DIR=.docker-volumes
-          DOCKFLARE_CF_API_TOKEN=dummy
-          DOCKFLARE_TUNNEL_NAME=${STACK_ID}
-          DOCKFLARE_HOSTNAME=dockflare.${DOMAIN}
-          DOZZLE_HOSTNAME=logs.${DOMAIN}
-          FILEBROWSER_HOSTNAME=files.${DOMAIN}
-          TTYD_HOSTNAME=ssh.${DOMAIN}
+          cat >> .env <<'EOF'
           COORDINATOR_ENABLE=true
           RTDB_URL=https://x.firebaseio.com
           RTDB_SERVICE_ACCOUNT=base64:e30=
-          COORDINATOR_READONLY_FLAG_PATH=.docker-volumes/.readonly
           RCLONE_ENABLE=true
-          RCLONE_REMOTE=r
-          RCLONE_PATH=${STACK_ID}
           LITESTREAM_ENABLE=true
           LITESTREAM_DB_PATH=.docker-volumes/app.db
-          LITESTREAM_S3_ENDPOINT=https://s3.example
-          LITESTREAM_S3_BUCKET=b
-          LITESTREAM_S3_ACCESS_KEY_ID=k
-          LITESTREAM_S3_SECRET_ACCESS_KEY=s
           DOZZLE_ENABLE=true
           DOZZLE_PASSWORD=pw
           FILEBROWSER_ENABLE=true
@@ -131,60 +77,27 @@ jobs:
           TTYD_ENABLE=true
           TTYD_CREDENTIAL=admin:secret
           TAILSCALE_ENABLE=true
-          TAILSCALE_TAGS=tag:container
-          TS_AUTHKEY=dummy
           EOF
           node scripts/bootstrap.mjs
           grep -q '^COMPOSE_PROFILES=core,coordinator,rclone,litestream,tailscale,dozzle,filebrowser,ttyd$' .env.resolved
           docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
 
   build-images:
-    name: Build service images (buildx + gha cache)
+    name: Build service images
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build coordinator (cache gha)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./services/coordinator
-          push: false
-          load: true
-          tags: dockflarestack/coordinator:ci
-          cache-from: type=gha,scope=coordinator
-          cache-to: type=gha,mode=max,scope=coordinator
-
-      - name: Build rclone (cache gha)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./services/rclone
-          push: false
-          load: true
-          tags: dockflarestack/rclone:ci
-          cache-from: type=gha,scope=rclone
-          cache-to: type=gha,mode=max,scope=rclone
-
-      - name: Build ttyd (cache gha)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./services/ttyd
-          push: false
-          load: true
-          tags: dockflarestack/ttyd:ci
-          cache-from: type=gha,scope=ttyd
-          cache-to: type=gha,mode=max,scope=ttyd
-
-      - name: Build litestream (cache gha)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./services/litestream
-          push: false
-          load: true
-          tags: dockflarestack/litestream:ci
-          cache-from: type=gha,scope=litestream
-          cache-to: type=gha,mode=max,scope=litestream
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v4
+      - name: Build coordinator
+        uses: docker/build-push-action@v7
+        with: { context: ./services/coordinator, push: false, load: true, tags: dockflarestack/coordinator:ci, cache-from: 'type=gha,scope=coordinator', cache-to: 'type=gha,mode=max,scope=coordinator' }
+      - name: Build rclone
+        uses: docker/build-push-action@v7
+        with: { context: ./services/rclone, push: false, load: true, tags: dockflarestack/rclone:ci, cache-from: 'type=gha,scope=rclone', cache-to: 'type=gha,mode=max,scope=rclone' }
+      - name: Build ttyd
+        uses: docker/build-push-action@v7
+        with: { context: ./services/ttyd, push: false, load: true, tags: dockflarestack/ttyd:ci, cache-from: 'type=gha,scope=ttyd', cache-to: 'type=gha,mode=max,scope=ttyd' }
+      - name: Build litestream
+        uses: docker/build-push-action@v7
+        with: { context: ./services/litestream, push: false, load: true, tags: dockflarestack/litestream:ci, cache-from: 'type=gha,scope=litestream', cache-to: 'type=gha,mode=max,scope=litestream' }
