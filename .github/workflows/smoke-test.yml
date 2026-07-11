@@ -15,10 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node (co cache npm)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install deps
         run: npm install
@@ -34,6 +35,12 @@ jobs:
       - name: Smoke test (base64, readonly-guard, bootstrap)
         run: node test/smoke.mjs
 
+      - name: Cache apt (shellcheck)
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-shellcheck-${{ runner.os }}
+
       - name: Shellcheck entrypoints
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
@@ -47,10 +54,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node (co cache npm)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install deps
         run: npm install
@@ -115,3 +123,45 @@ jobs:
           grep COMPOSE_PROFILES .env.resolved
           docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
           echo "compose config full: OK"
+
+  build-images:
+    name: Build service images (buildx + gha cache)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build tung service co Dockerfile, dung cache type=gha (mode=max).
+      # Lan 2 build se hit cache -> nhanh hon ro (log 'CACHED').
+      - name: Build coordinator (cache gha)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/coordinator
+          push: false
+          load: true
+          tags: dockflarestack/coordinator:ci
+          cache-from: type=gha,scope=coordinator
+          cache-to: type=gha,mode=max,scope=coordinator
+
+      - name: Build rclone (cache gha)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/rclone
+          push: false
+          load: true
+          tags: dockflarestack/rclone:ci
+          cache-from: type=gha,scope=rclone
+          cache-to: type=gha,mode=max,scope=rclone
+
+      - name: Build ttyd (cache gha)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/ttyd
+          push: false
+          load: true
+          tags: dockflarestack/ttyd:ci
+          cache-from: type=gha,scope=ttyd
+          cache-to: type=gha,mode=max,scope=ttyd
