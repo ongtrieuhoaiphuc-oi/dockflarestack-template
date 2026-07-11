@@ -4,7 +4,7 @@ name: deploy
 # Chay thu cong (workflow_dispatch).
 #
 # CAU HINH SECRET: luu TOAN BO noi dung file .env vao 1 GitHub Secret ten
-#   BOOTSTRAP_ENV_FILE
+# BOOTSTRAP_ENV_FILE
 # Workflow ghi noi dung nay ra file .env roi chay bootstrap.
 on:
   workflow_dispatch:
@@ -85,36 +85,77 @@ jobs:
 
       - name: Pre-init credential cho service bao mat (tranh crash-loop)
         run: |
-          set -a; . ./.env.resolved; set +a
-          VOL="${DOCKER_VOLUMES_DIR:-.docker-volumes}"
-          mkdir -p "$VOL/dockflare" "$VOL/dozzle" "$VOL/filebrowser" "$VOL/redis"
+          set -euo pipefail
+
+          # .env.resolved la dotenv, KHONG phai shell script. Doc bang dotenv de
+          # password/JSON co khoang trang, $, &, dau nhay... khong bi shell parse.
+          env_get() {
+            ENV_KEY="$1" node --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              import dotenv from "dotenv";
+              const env = dotenv.parse(readFileSync(".env.resolved", "utf8"));
+              process.stdout.write(env[process.env.ENV_KEY] ?? "");
+            '
+          }
+
+          VOL="$(env_get DOCKER_VOLUMES_DIR)"
+          VOL="${VOL:-.docker-volumes}"
+          case "$VOL" in
+            /*) VOL_ABS="$VOL" ;;
+            *)  VOL_ABS="$(pwd)/$VOL" ;;
+          esac
+          mkdir -p "$VOL_ABS/dockflare" "$VOL_ABS/dozzle" "$VOL_ABS/filebrowser" "$VOL_ABS/redis"
+
+          DOZZLE_ENABLE="$(env_get DOZZLE_ENABLE)"
+          DOZZLE_AUTH_PROVIDER="$(env_get DOZZLE_AUTH_PROVIDER)"
+          DOZZLE_USERNAME="$(env_get DOZZLE_USERNAME)"
+          DOZZLE_PASSWORD="$(env_get DOZZLE_PASSWORD)"
 
           # --- Dozzle: sinh users.yml bang chinh binary dozzle (dung format) ---
-          if grep -q 'DOZZLE_ENABLE=true' .env.resolved && [ "${DOZZLE_AUTH_PROVIDER:-simple}" = "simple" ]; then
+          if [ "$DOZZLE_ENABLE" = "true" ] && [ "${DOZZLE_AUTH_PROVIDER:-simple}" = "simple" ]; then
             echo "== sinh dozzle users.yml =="
             docker run --rm amir20/dozzle:latest generate \
               "${DOZZLE_USERNAME:-admin}" \
-              --password "${DOZZLE_PASSWORD}" \
-              --name "${DOZZLE_USERNAME:-admin}" > "$VOL/dozzle/users.yml"
-            echo "da tao $VOL/dozzle/users.yml ($(wc -l < "$VOL/dozzle/users.yml") dong)"
+              --password "$DOZZLE_PASSWORD" \
+              --name "${DOZZLE_USERNAME:-admin}" > "$VOL_ABS/dozzle/users.yml"
+            test -s "$VOL_ABS/dozzle/users.yml" || { echo "[ERROR] Dozzle users.yml rong"; exit 1; }
+            echo "da tao $VOL/dozzle/users.yml ($(wc -l < "$VOL_ABS/dozzle/users.yml") dong)"
           fi
 
+          FILEBROWSER_ENABLE="$(env_get FILEBROWSER_ENABLE)"
+          FILEBROWSER_PORT="$(env_get FILEBROWSER_PORT)"
+          FILEBROWSER_ROOT="$(env_get FILEBROWSER_ROOT)"
+          FILEBROWSER_ADMIN_PASSWORD="$(env_get FILEBROWSER_ADMIN_PASSWORD)"
+
           # --- Filebrowser: config init + set admin password (DB phai co truoc khi start) ---
-          if grep -q 'FILEBROWSER_ENABLE=true' .env.resolved; then
+          if [ "$FILEBROWSER_ENABLE" = "true" ]; then
             echo "== init filebrowser DB + admin password =="
-            DB="$VOL/filebrowser/filebrowser.db"
+            DB="$VOL_ABS/filebrowser/filebrowser.db"
+
+            # Image filebrowser chay UID:GID 1000:1000. Thu muc do runner tao la
+            # root-owned, nen neu khong chown thi config init loi permission denied.
+            sudo chown -R 1000:1000 "$VOL_ABS/filebrowser"
+
             if [ ! -f "$DB" ]; then
-              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
+              docker run --rm --user 1000:1000 \
+                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
                 config init --database /database/filebrowser.db
-              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
-                config set --database /database/filebrowser.db --address 0.0.0.0 --port "${FILEBROWSER_PORT:-8081}" --root "${FILEBROWSER_ROOT:-/srv}"
-              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
-                users add admin "${FILEBROWSER_ADMIN_PASSWORD}" --database /database/filebrowser.db --perm.admin || \
-              docker run --rm -v "$(pwd)/$VOL/filebrowser:/database" filebrowser/filebrowser:latest \
-                users update admin --password "${FILEBROWSER_ADMIN_PASSWORD}" --database /database/filebrowser.db
+              docker run --rm --user 1000:1000 \
+                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+                config set --database /database/filebrowser.db \
+                --address 0.0.0.0 --port "${FILEBROWSER_PORT:-8081}" --root "${FILEBROWSER_ROOT:-/srv}"
+              docker run --rm --user 1000:1000 \
+                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+                users add admin "$FILEBROWSER_ADMIN_PASSWORD" \
+                --database /database/filebrowser.db --perm.admin
+              test -s "$DB" || { echo "[ERROR] Filebrowser DB khong duoc tao"; exit 1; }
               echo "da init filebrowser DB + set admin password"
             else
-              echo "filebrowser DB da ton tai, bo qua init"
+              echo "filebrowser DB da ton tai, cap nhat admin password"
+              docker run --rm --user 1000:1000 \
+                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+                users update admin --password "$FILEBROWSER_ADMIN_PASSWORD" \
+                --database /database/filebrowser.db
             fi
           fi
 
@@ -143,9 +184,9 @@ jobs:
         run: |
           set -a; . ./.env.resolved; set +a
           echo "DockFlare UI : https://${DOCKFLARE_HOSTNAME}"
-          grep -q 'DOZZLE_ENABLE=true' .env.resolved && echo "Dozzle       : https://${DOZZLE_HOSTNAME}" || true
-          grep -q 'FILEBROWSER_ENABLE=true' .env.resolved && echo "Filebrowser  : https://${FILEBROWSER_HOSTNAME}" || true
-          grep -q 'TTYD_ENABLE=true' .env.resolved && echo "ttyd/WebSSH  : https://${TTYD_HOSTNAME}" || true
+          grep -q 'DOZZLE_ENABLE=true' .env.resolved && echo "Dozzle      : https://${DOZZLE_HOSTNAME}" || true
+          grep -q 'FILEBROWSER_ENABLE=true' .env.resolved && echo "Filebrowser : https://${FILEBROWSER_HOSTNAME}" || true
+          grep -q 'TTYD_ENABLE=true' .env.resolved && echo "ttyd/WebSSH : https://${TTYD_HOSTNAME}" || true
 
       - name: Keep-alive (giu stack song) + canh bao container crash-loop
         env:
@@ -163,7 +204,7 @@ jobs:
             # In log 15 dong cuoi cua container dang restart de de chan doan
             for c in $(docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' | awk '$2=="restarting"{print $1}'); do
               echo "  !! $c dang restart, log cuoi:"
-              docker logs --tail 15 "$c" 2>&1 | sed 's/^/     /' || true
+              docker logs --tail 15 "$c" 2>&1 | sed 's/^/    /' || true
             done
             curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://${DOCKFLARE_HOSTNAME}" 2>/dev/null || echo "tunnel chua san sang"
             if ! docker compose --env-file .env.resolved -f core/docker-compose.yml ps --status running --format '{{.Name}}' | grep -q dockflare; then
