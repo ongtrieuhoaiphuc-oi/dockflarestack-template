@@ -1,15 +1,17 @@
 name: deploy
 
 # Deploy that: bring up stack, expose service qua Cloudflare Tunnel theo DOMAIN.
-# Chay thu cong (workflow_dispatch). Can cau hinh GitHub Secrets (xem docs/10).
+# Chay thu cong (workflow_dispatch).
+#
+# CAU HINH SECRET: luu TOAN BO noi dung file .env vao 1 GitHub Secret ten
+#   BOOTSTRAP_ENV_FILE
+# (repo > Settings > Secrets and variables > Actions > New repository secret).
+# Workflow se ghi noi dung nay ra file .env roi chay bootstrap.
+#
 # CACHE (dat o tang yml): npm (~/.npm), docker buildx (gha), .docker-volumes.
 on:
   workflow_dispatch:
     inputs:
-      profiles:
-        description: 'Module bat them (ngoai core), cach nhau dau phay. Vd: dozzle,filebrowser,ttyd'
-        required: false
-        default: 'dozzle,filebrowser,ttyd'
       keep_alive_minutes:
         description: 'So phut giu stack song (keep-alive) truoc khi job ket thuc. Toi da ~350 (job GH gioi han 6h).'
         required: false
@@ -19,7 +21,6 @@ jobs:
   deploy:
     name: Deploy stack qua Cloudflare Tunnel
     runs-on: ubuntu-latest
-    # Job GitHub-hosted toi da 6h. Timeout hoi lon hon keep-alive de step cleanup chay.
     timeout-minutes: 360
     steps:
       - name: Checkout
@@ -67,40 +68,18 @@ jobs:
             fi
           done
 
-      - name: Tao .env tu GitHub Secrets
+      - name: Tao .env tu secret BOOTSTRAP_ENV_FILE
         env:
-          STACK_ID: ${{ secrets.STACK_ID }}
-          DOMAIN: ${{ secrets.DOMAIN }}
-          CF_API_TOKEN: ${{ secrets.DOCKFLARE_CF_API_TOKEN }}
-          RTDB_URL: ${{ secrets.RTDB_URL }}
-          RTDB_SA_B64: ${{ secrets.RTDB_SERVICE_ACCOUNT_B64 }}
-          DOZZLE_PASSWORD: ${{ secrets.DOZZLE_PASSWORD }}
-          FILEBROWSER_ADMIN_PASSWORD: ${{ secrets.FILEBROWSER_ADMIN_PASSWORD }}
-          TTYD_CREDENTIAL: ${{ secrets.TTYD_CREDENTIAL }}
-          ACCESS_ALLOWED_EMAILS: ${{ secrets.ACCESS_ALLOWED_EMAILS }}
-          ENABLED_PROFILES: ${{ github.event.inputs.profiles }}
+          ENV_CONTENT: ${{ secrets.BOOTSTRAP_ENV_FILE }}
         run: |
           set -e
-          echo "== tao .env =="
-          {
-            echo "STACK_ID=${STACK_ID}"
-            echo "DOMAIN=${DOMAIN}"
-            echo "DOCKER_VOLUMES_DIR=.docker-volumes"
-            echo "DOCKFLARE_CF_API_TOKEN=${CF_API_TOKEN}"
-            echo "DOCKFLARE_TUNNEL_NAME=\${STACK_ID}"
-            echo "DOCKFLARE_HOSTNAME=dockflare.\${DOMAIN}"
-            echo "DOZZLE_HOSTNAME=logs.\${DOMAIN}"
-            echo "FILEBROWSER_HOSTNAME=files.\${DOMAIN}"
-            echo "TTYD_HOSTNAME=ssh.\${DOMAIN}"
-            echo "ACCESS_PROTECT=true"
-            echo "ACCESS_ALLOWED_EMAILS=${ACCESS_ALLOWED_EMAILS}"
-            echo "RTDB_URL=${RTDB_URL}"
-            echo "RTDB_SERVICE_ACCOUNT=base64:${RTDB_SA_B64}"
-            case ",${ENABLED_PROFILES}," in *,dozzle,*) echo "DOZZLE_ENABLE=true"; echo "DOZZLE_PASSWORD=${DOZZLE_PASSWORD}";; esac
-            case ",${ENABLED_PROFILES}," in *,filebrowser,*) echo "FILEBROWSER_ENABLE=true"; echo "FILEBROWSER_ADMIN_PASSWORD=${FILEBROWSER_ADMIN_PASSWORD}";; esac
-            case ",${ENABLED_PROFILES}," in *,ttyd,*) echo "TTYD_ENABLE=true"; echo "TTYD_CREDENTIAL=${TTYD_CREDENTIAL}";; esac
-          } > .env
-          echo "da tao .env (khong in noi dung vi chua secret)"
+          if [ -z "$ENV_CONTENT" ]; then
+            echo "[ERROR] Secret BOOTSTRAP_ENV_FILE rong. Luu toan bo noi dung file .env"
+            echo "        vao GitHub Secret ten BOOTSTRAP_ENV_FILE truoc khi chay."
+            exit 1
+          fi
+          printf '%s\n' "$ENV_CONTENT" > .env
+          echo "da ghi .env tu secret BOOTSTRAP_ENV_FILE ($(wc -l < .env) dong, khong in noi dung vi chua secret)"
 
       - name: Bootstrap (resolve + validate + fail-closed)
         run: |
@@ -139,10 +118,7 @@ jobs:
 
       # ------------------------------------------------------------------
       # KEEP-ALIVE: giu stack song de truy cap service qua tunnel.
-      # GitHub-hosted runner ephemeral -> khi step ket thuc, container tat,
-      # tunnel dong. Step nay loop heartbeat toi keep_alive_minutes phut,
-      # in trang thai container + thu tunnel dinh ky. Neu bat coordinator,
-      # day cung la khoang overlap de handover sang phien ke tiep.
+      # GitHub-hosted runner ephemeral -> khi step ket thuc, container tat.
       # De chay BEN VUNG lau dai -> dung self-hosted runner (xem docs/10).
       # ------------------------------------------------------------------
       - name: Keep-alive (giu stack song)
@@ -158,9 +134,7 @@ jobs:
             i=$((i+1))
             echo "--- heartbeat #$i @ $(date -u +%H:%M:%SZ) ---"
             docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' || true
-            # thu tunnel (best-effort)
             curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://${DOCKFLARE_HOSTNAME}" 2>/dev/null || echo "tunnel chua san sang"
-            # neu container core chet -> thoat som de job do (bao loi)
             if ! docker compose --env-file .env.resolved -f core/docker-compose.yml ps --status running --format '{{.Name}}' | grep -q dockflare; then
               echo "[ERROR] DockFlare core khong con chay -> dung keep-alive"; exit 1
             fi
