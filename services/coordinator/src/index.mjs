@@ -16,14 +16,41 @@ const INSTANCE_ID = process.env.HOSTNAME || randomUUID().slice(0, 8);
 const JOB_START = Date.now();
 
 function log(level, msg) { console.log(`[${new Date().toISOString()}] [${level}] [coordinator] ${msg}`); }
+function fatal(msg) { console.error(`[${new Date().toISOString()}] [FATAL] [coordinator] ${msg}`); }
+
+// Decode marker base64: + validate JSON. Log ro loi thay vi throw am tham.
+function parseServiceAccount(raw) {
+  if (!raw || !raw.trim()) {
+    fatal('RTDB_SERVICE_ACCOUNT rong. Coordinator can service account Firebase. '
+      + 'Set trong .env (co the dang base64:<chuoi>). Neu chua dung coordinator, dat COORDINATOR_ENABLE=false.');
+    process.exit(1);
+  }
+  const decoded = raw.startsWith('base64:')
+    ? Buffer.from(raw.slice(7), 'base64').toString('utf8')
+    : raw;
+  try {
+    return JSON.parse(decoded);
+  } catch (e) {
+    fatal('RTDB_SERVICE_ACCOUNT sau decode KHONG JSON.parse duoc. '
+      + 'Kiem tra: (1) neu la base64 phai co prefix "base64:"; (2) noi dung la JSON service account hop le. '
+      + `Loi: ${e.message}`);
+    process.exit(1);
+  }
+}
 
 function initDb() {
-  const sa = JSON.parse(
-    process.env.RTDB_SERVICE_ACCOUNT.startsWith('base64:')
-      ? Buffer.from(process.env.RTDB_SERVICE_ACCOUNT.slice(7), 'base64').toString('utf8')
-      : process.env.RTDB_SERVICE_ACCOUNT
-  );
-  admin.initializeApp({ credential: admin.credential.cert(sa), databaseURL: process.env.RTDB_URL });
+  const url = process.env.RTDB_URL;
+  if (!url || !url.trim()) {
+    fatal('RTDB_URL rong. Vd: https://<project>.firebaseio.com');
+    process.exit(1);
+  }
+  const sa = parseServiceAccount(process.env.RTDB_SERVICE_ACCOUNT);
+  try {
+    admin.initializeApp({ credential: admin.credential.cert(sa), databaseURL: url });
+  } catch (e) {
+    fatal(`initializeApp that bai: ${e.message}`);
+    process.exit(1);
+  }
   return admin.database();
 }
 
@@ -39,14 +66,11 @@ function setReadonly(on) {
   } catch (e) { log('WARN', `readonly flag loi: ${e.message}`); }
 }
 
-// Gianh primary bang transaction atomic.
 async function tryAcquire() {
   const ref = db.ref(`${LOCK_PATH}/primary`);
   const now = Date.now();
   const res = await ref.transaction((cur) => {
-    if (cur && cur.expiresAtMs && cur.expiresAtMs > now && cur.instanceId !== INSTANCE_ID) {
-      return; // abort: primary khac con song
-    }
+    if (cur && cur.expiresAtMs && cur.expiresAtMs > now && cur.instanceId !== INSTANCE_ID) return;
     const nextFence = (cur && cur.fenceToken ? cur.fenceToken : 0) + 1;
     fenceToken = nextFence;
     return { instanceId: INSTANCE_ID, fenceToken: nextFence, since: SERVER_TS, expiresAtMs: now + TTL_SEC * 1000 };
@@ -58,7 +82,7 @@ async function heartbeat() {
   const ref = db.ref(`${LOCK_PATH}/primary`);
   const now = Date.now();
   const res = await ref.transaction((cur) => {
-    if (!cur || cur.instanceId !== INSTANCE_ID) return; // mat quyen
+    if (!cur || cur.instanceId !== INSTANCE_ID) return;
     return { ...cur, expiresAtMs: now + TTL_SEC * 1000, heartbeat: SERVER_TS };
   });
   return res.committed && res.snapshot.val() && res.snapshot.val().instanceId === INSTANCE_ID;
@@ -71,7 +95,6 @@ async function registerInstance(state) {
 async function countOverlap() {
   const snap = await db.ref(`${LOCK_PATH}/instances`).get();
   if (!snap.exists()) return 1;
-  const now = Date.now();
   return Object.values(snap.val()).filter((i) => i.state && i.state !== 'exiting').length || 1;
 }
 
@@ -79,8 +102,6 @@ async function flushAndRelease() {
   log('INFO', 'chuyen READ-ONLY + flush truoc khi nha lock');
   setReadonly(true);
   await registerInstance('readonly');
-  // Flush guard: chi flush module dang bat (rclone push / litestream checkpoint
-  // do container rieng lo; o day chi phat tin hieu + cho).
   if (['1', 'true', 'yes'].includes(String(process.env.RCLONE_ENABLE).toLowerCase())) log('INFO', 'flush: rclone push (do service rclone thuc hien)');
   else log('INFO', 'flush skipped: rclone disabled');
   if (['1', 'true', 'yes'].includes(String(process.env.LITESTREAM_ENABLE).toLowerCase())) log('INFO', 'flush: litestream checkpoint');
@@ -93,14 +114,17 @@ async function flushAndRelease() {
 
 async function loop() {
   log('INFO', `khoi dong instance=${INSTANCE_ID} lock=${LOCK_PATH} ttl=${TTL_SEC}s buffer=${BUFFER_SEC}s`);
-  await registerInstance('starting');
-  // Standby: cho tro thanh primary.
-  await registerInstance('ready-standby');
+  try {
+    await registerInstance('starting');
+    await registerInstance('ready-standby');
+  } catch (e) {
+    fatal(`khong ghi duoc RTDB (kiem tra quyen service account + databaseURL): ${e.message}`);
+    process.exit(1);
+  }
 
   const timer = setInterval(async () => {
     try {
       const elapsed = (Date.now() - JOB_START) / 1000;
-      // Watcher deadline: gan het gio -> chu dong nha de instance moi len.
       if (isPrimary && elapsed > (60 * 60 - BUFFER_SEC)) {
         log('WARN', `gan deadline (${Math.round(elapsed)}s) -> bat dau handover`);
         clearInterval(timer);
@@ -115,7 +139,7 @@ async function loop() {
         else log('DEBUG', `heartbeat OK fence=${fenceToken}`);
       } else {
         const overlap = await countOverlap();
-        if (overlap > MAX_OVERLAP) log('WARN', `overlap=${overlap} > MAX_OVERLAP=${MAX_OVERLAP} (node co the tich tu)`);
+        if (overlap > MAX_OVERLAP) log('WARN', `overlap=${overlap} > MAX_OVERLAP=${MAX_OVERLAP}`);
         const got = await tryAcquire();
         if (got) {
           isPrimary = true;
@@ -127,9 +151,9 @@ async function loop() {
           setReadonly(true);
         }
       }
-    } catch (e) { log('ERROR', `loop loi: ${e.message}`); }
+    } catch (e) { log('ERROR', `loop loi (se thu lai): ${e.message}`); }
   }, HEARTBEAT_SEC * 1000);
 }
 
 process.on('SIGTERM', async () => { log('INFO', 'SIGTERM -> flush + release'); try { await flushAndRelease(); } catch {} process.exit(0); });
-loop().catch((e) => { log('ERROR', e.message); process.exit(1); });
+loop().catch((e) => { fatal(e.message); process.exit(1); });
