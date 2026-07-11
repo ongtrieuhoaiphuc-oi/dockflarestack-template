@@ -20,7 +20,7 @@ services:
       - "dockflare.access=${ACCESS_PROTECT:-true}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dockflare:/app/data
+      - ${DOCKER_VOLUMES_DIR}/dockflare:/app/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
       interval: 30s
@@ -33,10 +33,10 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/redis:/data
+      - ${DOCKER_VOLUMES_DIR}/redis:/data
 
   coordinator:
-    build: ../services/coordinator
+    build: ./services/coordinator
     profiles: ["coordinator"]
     restart: unless-stopped
     environment:
@@ -52,10 +52,10 @@ services:
       - RCLONE_ENABLE=${RCLONE_ENABLE:-false}
       - LITESTREAM_ENABLE=${LITESTREAM_ENABLE:-false}
     volumes:
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
+      - ${DOCKER_VOLUMES_DIR}:/data
 
   rclone:
-    build: ../services/rclone
+    build: ./services/rclone
     profiles: ["rclone"]
     restart: on-failure
     environment:
@@ -67,10 +67,10 @@ services:
       - RCLONE_CHECKERS=${RCLONE_CHECKERS:-4}
       - RCLONE_EXCLUDE=${RCLONE_EXCLUDE:-}
     volumes:
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
+      - ${DOCKER_VOLUMES_DIR}:/data
 
   litestream:
-    build: ../services/litestream
+    build: ./services/litestream
     profiles: ["litestream"]
     restart: unless-stopped
     environment:
@@ -80,7 +80,7 @@ services:
       - LITESTREAM_S3_ACCESS_KEY_ID=${LITESTREAM_S3_ACCESS_KEY_ID}
       - LITESTREAM_S3_SECRET_ACCESS_KEY=${LITESTREAM_S3_SECRET_ACCESS_KEY}
     volumes:
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
+      - ${DOCKER_VOLUMES_DIR}:/data
 
   tailscale:
     image: tailscale/tailscale:latest
@@ -93,7 +93,7 @@ services:
       - TS_USERSPACE=false
       - TS_EXTRA_ARGS=--advertise-tags=${TAILSCALE_TAGS}
     volumes:
-      - ${TAILSCALE_STATE_DIR:-.docker-volumes/tailscale}:/var/lib/tailscale
+      - ${TAILSCALE_STATE_DIR}:/var/lib/tailscale
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add: [net_admin]
@@ -115,7 +115,7 @@ services:
       - "dockflare.access=${ACCESS_PROTECT:-true}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dozzle:/data
+      - ${DOCKER_VOLUMES_DIR}/dozzle:/data
 
   filebrowser:
     image: filebrowser/filebrowser:latest
@@ -132,11 +132,11 @@ services:
       - "dockflare.service=http://filebrowser:${FILEBROWSER_PORT:-8081}"
       - "dockflare.access=${ACCESS_PROTECT:-true}"
     volumes:
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/srv
-      - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/filebrowser:/database
+      - ${DOCKER_VOLUMES_DIR}:/srv
+      - ${DOCKER_VOLUMES_DIR}/filebrowser:/database
 
   ttyd:
-    build: ../services/ttyd
+    build: ./services/ttyd
     profiles: ["ttyd"]
     restart: unless-stopped
     environment:
