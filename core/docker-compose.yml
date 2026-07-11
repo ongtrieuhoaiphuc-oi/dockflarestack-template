@@ -1,26 +1,13 @@
-# ==============================================================================
-# core/docker-compose.yml - DockFlareStack Template
-# ------------------------------------------------------------------------------
-# CACH CHAY (KHONG chay truc tiep file .env goc):
-#   node scripts/bootstrap.mjs            # resolve ${VAR} -> .env.resolved
-#   docker compose --env-file .env.resolved -f core/docker-compose.yml up -d
-#
-# EXPOSE QUA DOMAIN: moi service co label dockflare.* -> DockFlare tu tao DNS +
-# tunnel ingress + Zero Trust Access theo hostname <sub>.<DOMAIN>.
-# ==============================================================================
-
 name: dockflarestack
 
 services:
-  # --------------------------------------------------------------------------
-  # CORE - DockFlare master (luon chay, khong profile)
-  # --------------------------------------------------------------------------
   dockflare:
     image: alplat/dockflare:latest
     restart: unless-stopped
     environment:
       - CF_API_TOKEN=${DOCKFLARE_CF_API_TOKEN}
       - CF_ACCOUNT_ID=${DOCKFLARE_CF_ACCOUNT_ID}
+      - CF_ZONE_ID=${DOCKFLARE_CF_ZONE_ID}
       - CF_DOMAIN=${DOMAIN}
       - TUNNEL_NAME=${DOCKFLARE_TUNNEL_NAME}
       - LOG_LEVEL=${DOCKFLARE_LOG_LEVEL:-info}
@@ -48,9 +35,6 @@ services:
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/redis:/data
 
-  # --------------------------------------------------------------------------
-  # COORDINATOR - lifecycle handover (RTDB) - noi bo
-  # --------------------------------------------------------------------------
   coordinator:
     build: ../services/coordinator
     profiles: ["coordinator"]
@@ -70,9 +54,6 @@ services:
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
 
-  # --------------------------------------------------------------------------
-  # RCLONE - sync bulk .docker-volumes (exclude SQLite) - noi bo
-  # --------------------------------------------------------------------------
   rclone:
     build: ../services/rclone
     profiles: ["rclone"]
@@ -86,10 +67,6 @@ services:
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
 
-  # --------------------------------------------------------------------------
-  # LITESTREAM - SQLite realtime -> S3 Supabase - noi bo
-  # Build image rieng (FROM alpine) vi image goc :latest co bien the thieu /bin/sh.
-  # --------------------------------------------------------------------------
   litestream:
     build: ../services/litestream
     profiles: ["litestream"]
@@ -103,9 +80,6 @@ services:
     volumes:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/data
 
-  # --------------------------------------------------------------------------
-  # TAILSCALE - mang noi bo
-  # --------------------------------------------------------------------------
   tailscale:
     image: tailscale/tailscale:latest
     profiles: ["tailscale"]
@@ -120,12 +94,8 @@ services:
       - ${TAILSCALE_STATE_DIR:-.docker-volumes/tailscale}:/var/lib/tailscale
     devices:
       - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - net_admin
+    cap_add: [net_admin]
 
-  # --------------------------------------------------------------------------
-  # DOZZLE - log viewer (expose qua tunnel theo DOZZLE_HOSTNAME)
-  # --------------------------------------------------------------------------
   dozzle:
     image: amir20/dozzle:latest
     profiles: ["dozzle"]
@@ -145,9 +115,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/dozzle:/data
 
-  # --------------------------------------------------------------------------
-  # FILEBROWSER - quan ly file (expose qua tunnel theo FILEBROWSER_HOSTNAME)
-  # --------------------------------------------------------------------------
   filebrowser:
     image: filebrowser/filebrowser:latest
     profiles: ["filebrowser"]
@@ -166,9 +133,6 @@ services:
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}:/srv
       - ${DOCKER_VOLUMES_DIR:-.docker-volumes}/filebrowser:/database
 
-  # --------------------------------------------------------------------------
-  # TTYD / WebSSH (expose qua tunnel theo TTYD_HOSTNAME, luon bat Access)
-  # --------------------------------------------------------------------------
   ttyd:
     build: ../services/ttyd
     profiles: ["ttyd"]
