@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // bootstrap.mjs - LUON chay dau tien. Xu ly:
-//  1. Resolve ${VAR} long nhau (dotenv + dotenv-expand) -> ghi .env.resolved
+//  1. Resolve ${VAR} long nhau (deterministic, nhieu pass) -> ghi .env.resolved
 //  2. Sinh COMPOSE_PROFILES tu cac <SERVICE>_ENABLE (luon kem 'core')
 //  3. Hard-block STACK_ID=CHANGE_ME/rong khi bat module dung RTDB/remote -> exit non-zero
 //  4. Derive RCLONE_EXCLUDE tu LITESTREAM_DB_PATH (+wal/shm, pattern **/<db>)
@@ -9,7 +9,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import dotenv from 'dotenv';
-import dotenvExpand from 'dotenv-expand';
 import { makeLogger } from './lib/logger.mjs';
 import { bool } from './lib/env.mjs';
 
@@ -19,13 +18,33 @@ const ENV_OUT = '.env.resolved';
 
 function die(msg) { log.error(msg); process.exit(1); }
 
+// Expand ${VAR} deterministic: lap toi da 10 pass cho nested, uu tien gia tri
+// trong chinh file, fallback process.env. Khong phu thuoc quirk cua thu vien.
+function expandAll(map) {
+  const RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+  const resolve = (val, seen) => {
+    let out = val;
+    for (let pass = 0; pass < 10 && RE.test(out); pass++) {
+      RE.lastIndex = 0;
+      out = out.replace(RE, (m, name) => {
+        if (seen.has(name)) return m; // chong vong lap
+        const raw = map[name] ?? process.env[name] ?? '';
+        return resolve(raw, new Set([...seen, name]));
+      });
+    }
+    return out;
+  };
+  const result = {};
+  for (const [k, v] of Object.entries(map)) result[k] = resolve(String(v), new Set([k]));
+  return result;
+}
+
 // --- STEP 1: load + expand ${VAR} ---------------------------------------
 log.step(1, `doc ${ENV_IN} va expand ${'${VAR}'}`);
 let parsed;
 try {
   const raw = dotenv.parse(readFileSync(ENV_IN, 'utf8'));
-  const expanded = dotenvExpand.expand({ parsed: raw, processEnv: {} });
-  parsed = expanded.parsed;
+  parsed = expandAll(raw);
 } catch (e) {
   die(`Khong doc/expand duoc ${ENV_IN}: ${e.message}. Copy .env.example -> .env truoc.`);
 }
