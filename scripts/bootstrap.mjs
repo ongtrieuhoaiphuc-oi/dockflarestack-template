@@ -2,7 +2,7 @@
 // bootstrap.mjs - LUON chay dau tien. Xu ly:
 //  1. Resolve ${VAR} long nhau (deterministic, nhieu pass) -> ghi .env.resolved
 //  2. Sinh COMPOSE_PROFILES tu cac <SERVICE>_ENABLE (luon kem 'core')
-//  3. Hard-block STACK_ID=CHANGE_ME/rong khi bat module dung RTDB/remote -> exit non-zero
+//  3. Hard-block STACK_ID/DOMAIN=CHANGE_ME -> exit non-zero
 //  4. Derive RCLONE_EXCLUDE tu LITESTREAM_DB_PATH (+wal/shm, pattern **/<db>)
 //  5. Rang buoc: COORDINATOR_ENABLE=true -> ep DOCKFLARE_REDIS_ENABLE=true
 //  6. Fail-closed: module bao mat thieu credential -> exit non-zero
@@ -18,8 +18,7 @@ const ENV_OUT = '.env.resolved';
 
 function die(msg) { log.error(msg); process.exit(1); }
 
-// Expand ${VAR} deterministic: lap toi da 10 pass cho nested, uu tien gia tri
-// trong chinh file, fallback process.env. Khong phu thuoc quirk cua thu vien.
+// Expand ${VAR} deterministic: lap toi da 10 pass cho nested.
 function expandAll(map) {
   const RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
   const resolve = (val, seen) => {
@@ -27,7 +26,7 @@ function expandAll(map) {
     for (let pass = 0; pass < 10 && RE.test(out); pass++) {
       RE.lastIndex = 0;
       out = out.replace(RE, (m, name) => {
-        if (seen.has(name)) return m; // chong vong lap
+        if (seen.has(name)) return m;
         const raw = map[name] ?? process.env[name] ?? '';
         return resolve(raw, new Set([...seen, name]));
       });
@@ -52,21 +51,35 @@ try {
 const E = (k, d = '') => (parsed[k] ?? d);
 const EB = (k, d = false) => bool(parsed[k], d);
 
-// --- STEP 2: hard-block STACK_ID ----------------------------------------
-log.step(2, 'kiem tra STACK_ID');
+// --- STEP 2: hard-block STACK_ID + DOMAIN -------------------------------
+log.step(2, 'kiem tra STACK_ID va DOMAIN');
 const STACK_ID = E('STACK_ID');
 const usesShared = EB('COORDINATOR_ENABLE') || EB('RCLONE_ENABLE') || EB('LITESTREAM_ENABLE');
 if (usesShared && (!STACK_ID || STACK_ID === 'CHANGE_ME')) {
   die('STACK_ID dang la CHANGE_ME/rong nhung co module dung RTDB/remote chung duoc bat. '
     + 'Doi STACK_ID thanh gia tri duy nhat truoc khi tiep tuc.');
 }
-log.info(`STACK_ID=${STACK_ID || '(chua set, khong co module dung chung)'}`);
+const DOMAIN = E('DOMAIN');
+if (!DOMAIN || DOMAIN.includes('CHANGE_ME')) {
+  die('DOMAIN chua duoc cau hinh (dang CHANGE_ME). DOMAIN la BAT BUOC de expose service '
+    + 'qua Cloudflare Tunnel. Dat DOMAIN = domain ban da add vao Cloudflare (vd example.com).');
+}
+log.info(`STACK_ID=${STACK_ID} DOMAIN=${DOMAIN}`);
+
+// Canh bao hostname cua tung service duoc expose
+for (const [flag, hostVar, name] of [
+  ['DOZZLE_ENABLE', 'DOZZLE_HOSTNAME', 'dozzle'],
+  ['FILEBROWSER_ENABLE', 'FILEBROWSER_HOSTNAME', 'filebrowser'],
+  ['TTYD_ENABLE', 'TTYD_HOSTNAME', 'ttyd'],
+]) {
+  if (EB(flag)) log.info(`expose ${name} -> https://${E(hostVar)}`);
+}
+log.info(`DockFlare UI -> https://${E('DOCKFLARE_HOSTNAME')}`);
 
 // --- STEP 3: rang buoc Redis <-> coordinator ----------------------------
 log.step(3, 'rang buoc Redis khi bat coordinator');
 if (EB('COORDINATOR_ENABLE') && !EB('DOCKFLARE_REDIS_ENABLE')) {
-  log.warn('COORDINATOR_ENABLE=true nhung DOCKFLARE_REDIS_ENABLE=false. '
-    + 'Luc handover luon multi-host -> tu bat Redis.');
+  log.warn('COORDINATOR_ENABLE=true nhung DOCKFLARE_REDIS_ENABLE=false -> tu bat Redis.');
   parsed.DOCKFLARE_REDIS_ENABLE = 'true';
 }
 
