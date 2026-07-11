@@ -1,43 +1,37 @@
 #!/bin/sh
-# rclone entrypoint - pull truoc khi start, push khi nhan tin hieu (SIGTERM).
-# EXCLUDE file SQLite (litestream so huu SQLite). RCLONE_EXCLUDE do bootstrap derive.
 set -eu
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [INFO] [rclone] $1"; }
-
 DATA_DIR=/data
 REMOTE="${RCLONE_REMOTE}:${RCLONE_PATH}"
+CONFIG_ARGS=""
+
+if [ -n "${RCLONE_CONFIG_CONTENT:-}" ]; then
+  CONFIG=/tmp/rclone.conf
+  case "$RCLONE_CONFIG_CONTENT" in
+    base64:*) printf '%s' "${RCLONE_CONFIG_CONTENT#base64:}" | base64 -d > "$CONFIG" ;;
+    *) printf '%s\n' "$RCLONE_CONFIG_CONTENT" > "$CONFIG" ;;
+  esac
+  chmod 600 "$CONFIG"
+  CONFIG_ARGS="--config $CONFIG"
+elif [ -n "${RCLONE_CONFIG_PATH:-}" ]; then
+  CONFIG_ARGS="--config $RCLONE_CONFIG_PATH"
+else
+  echo "[FATAL] [rclone] thieu config" >&2; exit 1
+fi
 
 run_sync() {
-  src=$1
-  dst=$2
-  set -- --transfers "${RCLONE_TRANSFERS:-4}" --checkers "${RCLONE_CHECKERS:-4}" --fast-list
-
+  src=$1; dst=$2
+  # shellcheck disable=SC2086
+  set -- $CONFIG_ARGS --transfers "${RCLONE_TRANSFERS:-4}" --checkers "${RCLONE_CHECKERS:-4}" --fast-list
   if [ -n "${RCLONE_EXCLUDE:-}" ]; then
-    old_ifs=$IFS
-    IFS=','
-    for pattern in $RCLONE_EXCLUDE; do
-      set -- "$@" --exclude "$pattern"
-    done
-    IFS=$old_ifs
+    old=$IFS; IFS=','
+    for p in $RCLONE_EXCLUDE; do set -- "$@" --exclude "$p"; done
+    IFS=$old
   fi
-
   rclone sync "$src" "$dst" "$@"
 }
-
-pull() {
-  log "PULL $REMOTE -> $DATA_DIR (exclude: ${RCLONE_EXCLUDE:-none})"
-  run_sync "$REMOTE" "$DATA_DIR" || log "pull loi (co the remote trong lan dau)"
-}
-
-push() {
-  log "PUSH $DATA_DIR -> $REMOTE (exclude: ${RCLONE_EXCLUDE:-none})"
-  run_sync "$DATA_DIR" "$REMOTE"
-  log "push xong"
-}
-
+pull() { log "PULL $REMOTE -> $DATA_DIR"; run_sync "$REMOTE" "$DATA_DIR" || log "remote rong/khong ton tai, bo qua pull lan dau"; }
+push() { log "PUSH $DATA_DIR -> $REMOTE"; run_sync "$DATA_DIR" "$REMOTE"; }
 trap 'push; exit 0' TERM INT
-
-log "khoi dong. remote=$REMOTE"
 pull
-log "pull xong, dung cho tin hieu flush (SIGTERM). Ngu..."
 while true; do sleep 30; done
