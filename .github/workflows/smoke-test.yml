@@ -7,10 +7,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-unit:
     name: Lint + Unit + Bootstrap smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -19,8 +23,6 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '24'
-          # Repo chua co package-lock.json -> tat auto cache cua setup-node
-          # (tranh loi 'Dependencies lock file is not found'). Cache thu cong o duoi.
           package-manager-cache: false
 
       - name: Cache npm (~/.npm) theo hash package.json
@@ -37,7 +39,7 @@ jobs:
       - name: Syntax check tat ca .mjs
         run: |
           echo "== kiem tra syntax cac file .mjs =="
-          for f in $(find scripts test services -name '*.mjs'); do
+          find scripts test services -name '*.mjs' -print0 | while IFS= read -r -d '' f; do
             echo "  check $f"
             node --check "$f"
           done
@@ -54,12 +56,12 @@ jobs:
       - name: Shellcheck entrypoints
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          echo "== shellcheck entrypoints =="
-          shellcheck services/rclone/entrypoint.sh services/ttyd/entrypoint.sh services/litestream/entrypoint.sh || true
+          shellcheck services/rclone/entrypoint.sh services/ttyd/entrypoint.sh services/litestream/entrypoint.sh
 
   compose-validate:
     name: Validate docker-compose + profiles
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -93,13 +95,9 @@ jobs:
           DOCKFLARE_HOSTNAME=dockflare.${DOMAIN}
           EOF
           node scripts/bootstrap.mjs
-          echo "== .env.resolved =="
-          cat .env.resolved
 
       - name: Validate compose config (core)
-        run: |
-          docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
-          echo "compose config core: OK"
+        run: docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
 
       - name: Bootstrap + validate (full profiles)
         run: |
@@ -137,14 +135,13 @@ jobs:
           TS_AUTHKEY=dummy
           EOF
           node scripts/bootstrap.mjs
-          echo "== COMPOSE_PROFILES =="
-          grep COMPOSE_PROFILES .env.resolved
+          grep -q '^COMPOSE_PROFILES=core,coordinator,rclone,litestream,tailscale,dozzle,filebrowser,ttyd$' .env.resolved
           docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
-          echo "compose config full: OK"
 
   build-images:
     name: Build service images (buildx + gha cache)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -181,3 +178,13 @@ jobs:
           tags: dockflarestack/ttyd:ci
           cache-from: type=gha,scope=ttyd
           cache-to: type=gha,mode=max,scope=ttyd
+
+      - name: Build litestream (cache gha)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/litestream
+          push: false
+          load: true
+          tags: dockflarestack/litestream:ci
+          cache-from: type=gha,scope=litestream
+          cache-to: type=gha,mode=max,scope=litestream

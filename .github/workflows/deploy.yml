@@ -1,18 +1,15 @@
 name: deploy
 
-# Deploy that: bring up stack, expose service qua Cloudflare Tunnel theo DOMAIN.
-# Chay thu cong (workflow_dispatch).
-#
-# CAU HINH SECRET: luu TOAN BO noi dung file .env vao 1 GitHub Secret ten
-# BOOTSTRAP_ENV_FILE
-# Workflow ghi noi dung nay ra file .env roi chay bootstrap.
 on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: 'So phut giu stack song (keep-alive). Toi da ~350 (job GH gioi han 6h).'
+        description: 'So phut giu stack song, 1-350.'
         required: false
         default: '50'
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
@@ -54,14 +51,14 @@ jobs:
 
       - name: Build service images (buildx + gha cache)
         run: |
-          echo "== build service co Dockerfile voi cache gha =="
+          set -euo pipefail
           for svc in coordinator rclone ttyd litestream; do
             if [ -f "services/$svc/Dockerfile" ]; then
-              echo "  build $svc"
+              echo "build $svc"
               docker buildx build \
-                --cache-from type=gha,scope=$svc \
-                --cache-to type=gha,mode=max,scope=$svc \
-                --load -t dockflarestack/$svc:deploy "services/$svc"
+                --cache-from type=gha,scope="$svc" \
+                --cache-to type=gha,mode=max,scope="$svc" \
+                --load -t "dockflarestack/$svc:deploy" "services/$svc"
             fi
           done
 
@@ -69,9 +66,9 @@ jobs:
         env:
           ENV_CONTENT: ${{ secrets.BOOTSTRAP_ENV_FILE }}
         run: |
-          set -e
+          set -euo pipefail
           if [ -z "$ENV_CONTENT" ]; then
-            echo "[ERROR] Secret BOOTSTRAP_ENV_FILE rong. Luu toan bo noi dung file .env vao secret nay."
+            echo "[ERROR] Secret BOOTSTRAP_ENV_FILE rong."
             exit 1
           fi
           printf '%s\n' "$ENV_CONTENT" > .env
@@ -80,15 +77,11 @@ jobs:
       - name: Bootstrap (resolve + validate + fail-closed)
         run: |
           node scripts/bootstrap.mjs
-          echo "== profiles =="
           grep COMPOSE_PROFILES .env.resolved
 
-      - name: Pre-init credential cho service bao mat (tranh crash-loop)
+      - name: Pre-init credential cho service bao mat
         run: |
           set -euo pipefail
-
-          # .env.resolved la dotenv, KHONG phai shell script. Doc bang dotenv de
-          # password/JSON co khoang trang, $, &, dau nhay... khong bi shell parse.
           env_get() {
             ENV_KEY="$1" node --input-type=module -e '
               import { readFileSync } from "node:fs";
@@ -102,61 +95,36 @@ jobs:
           VOL="${VOL:-.docker-volumes}"
           case "$VOL" in
             /*) VOL_ABS="$VOL" ;;
-            *)  VOL_ABS="$(pwd)/$VOL" ;;
+            *) VOL_ABS="$(pwd)/$VOL" ;;
           esac
           mkdir -p "$VOL_ABS/dockflare" "$VOL_ABS/dozzle" "$VOL_ABS/filebrowser" "$VOL_ABS/redis"
 
-          DOZZLE_ENABLE="$(env_get DOZZLE_ENABLE)"
-          DOZZLE_AUTH_PROVIDER="$(env_get DOZZLE_AUTH_PROVIDER)"
-          DOZZLE_USERNAME="$(env_get DOZZLE_USERNAME)"
-          DOZZLE_PASSWORD="$(env_get DOZZLE_PASSWORD)"
-
-          # --- Dozzle: sinh users.yml bang chinh binary dozzle (dung format) ---
-          if [ "$DOZZLE_ENABLE" = "true" ] && [ "${DOZZLE_AUTH_PROVIDER:-simple}" = "simple" ]; then
+          if [ "$(env_get DOZZLE_ENABLE)" = "true" ] && [ "$(env_get DOZZLE_AUTH_PROVIDER)" = "simple" ]; then
             echo "== sinh dozzle users.yml =="
             docker run --rm amir20/dozzle:latest generate \
-              "${DOZZLE_USERNAME:-admin}" \
-              --password "$DOZZLE_PASSWORD" \
-              --name "${DOZZLE_USERNAME:-admin}" > "$VOL_ABS/dozzle/users.yml"
-            test -s "$VOL_ABS/dozzle/users.yml" || { echo "[ERROR] Dozzle users.yml rong"; exit 1; }
-            echo "da tao $VOL/dozzle/users.yml ($(wc -l < "$VOL_ABS/dozzle/users.yml") dong)"
+              "$(env_get DOZZLE_USERNAME)" \
+              --password "$(env_get DOZZLE_PASSWORD)" \
+              --name "$(env_get DOZZLE_USERNAME)" > "$VOL_ABS/dozzle/users.yml"
+            test -s "$VOL_ABS/dozzle/users.yml"
           fi
 
-          FILEBROWSER_ENABLE="$(env_get FILEBROWSER_ENABLE)"
-          FILEBROWSER_PORT="$(env_get FILEBROWSER_PORT)"
-          FILEBROWSER_ROOT="$(env_get FILEBROWSER_ROOT)"
-          FILEBROWSER_ADMIN_PASSWORD="$(env_get FILEBROWSER_ADMIN_PASSWORD)"
-
-          # --- Filebrowser: config init + set admin password (DB phai co truoc khi start) ---
-          if [ "$FILEBROWSER_ENABLE" = "true" ]; then
+          if [ "$(env_get FILEBROWSER_ENABLE)" = "true" ]; then
             echo "== init filebrowser DB + admin password =="
             DB="$VOL_ABS/filebrowser/filebrowser.db"
-
-            # Image filebrowser chay UID:GID 1000:1000. Thu muc do runner tao la
-            # root-owned, nen neu khong chown thi config init loi permission denied.
             sudo chown -R 1000:1000 "$VOL_ABS/filebrowser"
-
             if [ ! -f "$DB" ]; then
-              docker run --rm --user 1000:1000 \
-                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
                 config init --database /database/filebrowser.db
-              docker run --rm --user 1000:1000 \
-                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                config set --database /database/filebrowser.db \
-                --address 0.0.0.0 --port "${FILEBROWSER_PORT:-8081}" --root "${FILEBROWSER_ROOT:-/srv}"
-              docker run --rm --user 1000:1000 \
-                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                users add admin "$FILEBROWSER_ADMIN_PASSWORD" \
-                --database /database/filebrowser.db --perm.admin
-              test -s "$DB" || { echo "[ERROR] Filebrowser DB khong duoc tao"; exit 1; }
-              echo "da init filebrowser DB + set admin password"
+              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+                config set --database /database/filebrowser.db --address 0.0.0.0 \
+                --port "$(env_get FILEBROWSER_PORT)" --root "$(env_get FILEBROWSER_ROOT)"
+              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+                users add admin "$(env_get FILEBROWSER_ADMIN_PASSWORD)" --database /database/filebrowser.db --perm.admin
             else
-              echo "filebrowser DB da ton tai, cap nhat admin password"
-              docker run --rm --user 1000:1000 \
-                -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
-                users update admin --password "$FILEBROWSER_ADMIN_PASSWORD" \
-                --database /database/filebrowser.db
+              docker run --rm --user 1000:1000 -v "$VOL_ABS/filebrowser:/database" filebrowser/filebrowser:latest \
+                users update admin --password "$(env_get FILEBROWSER_ADMIN_PASSWORD)" --database /database/filebrowser.db
             fi
+            test -s "$DB"
           fi
 
       - name: Validate compose config
@@ -164,17 +132,15 @@ jobs:
 
       - name: Bring up stack
         run: |
-          set -a; . ./.env.resolved; set +a
           docker compose --env-file .env.resolved -f core/docker-compose.yml up -d --build
-          echo "== trang thai container =="
           docker compose --env-file .env.resolved -f core/docker-compose.yml ps
 
       - name: Cho DockFlare tao tunnel (retry)
         run: |
-          echo "== cho DockFlare dang ky tunnel/DNS (toi da 90s) =="
-          for i in $(seq 1 18); do
+          for _ in $(seq 1 18); do
             if docker compose --env-file .env.resolved -f core/docker-compose.yml logs dockflare 2>&1 | grep -qi 'tunnel'; then
-              echo "DockFlare da xu ly tunnel"; break
+              echo "DockFlare da xu ly tunnel"
+              break
             fi
             sleep 5
           done
@@ -182,33 +148,44 @@ jobs:
 
       - name: In cac URL service da expose
         run: |
-          set -a; . ./.env.resolved; set +a
-          echo "DockFlare UI : https://${DOCKFLARE_HOSTNAME}"
-          grep -q 'DOZZLE_ENABLE=true' .env.resolved && echo "Dozzle      : https://${DOZZLE_HOSTNAME}" || true
-          grep -q 'FILEBROWSER_ENABLE=true' .env.resolved && echo "Filebrowser : https://${FILEBROWSER_HOSTNAME}" || true
-          grep -q 'TTYD_ENABLE=true' .env.resolved && echo "ttyd/WebSSH : https://${TTYD_HOSTNAME}" || true
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import dotenv from "dotenv";
+            const e = dotenv.parse(readFileSync(".env.resolved", "utf8"));
+            console.log(`DockFlare UI : https://${e.DOCKFLARE_HOSTNAME}`);
+            if (e.DOZZLE_ENABLE === "true") console.log(`Dozzle       : https://${e.DOZZLE_HOSTNAME}`);
+            if (e.FILEBROWSER_ENABLE === "true") console.log(`Filebrowser  : https://${e.FILEBROWSER_HOSTNAME}`);
+            if (e.TTYD_ENABLE === "true") console.log(`ttyd/WebSSH  : https://${e.TTYD_HOSTNAME}`);
+          '
 
-      - name: Keep-alive (giu stack song) + canh bao container crash-loop
+      - name: Keep-alive + canh bao container crash-loop
         env:
           KEEP_MIN: ${{ github.event.inputs.keep_alive_minutes }}
         run: |
-          set -a; . ./.env.resolved; set +a
-          MINUTES="${KEEP_MIN:-50}"
-          END=$(( $(date +%s) + MINUTES * 60 ))
-          echo "== keep-alive ${MINUTES} phut =="
-          i=0
+          set -euo pipefail
+          case "$KEEP_MIN" in
+            ''|*[!0-9]*) echo "[ERROR] keep_alive_minutes phai la so 1-350"; exit 1 ;;
+          esac
+          if [ "$KEEP_MIN" -lt 1 ] || [ "$KEEP_MIN" -gt 350 ]; then
+            echo "[ERROR] keep_alive_minutes phai nam trong 1-350"
+            exit 1
+          fi
+          HOST="$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import dotenv from "dotenv";
+            process.stdout.write(dotenv.parse(readFileSync(".env.resolved", "utf8")).DOCKFLARE_HOSTNAME ?? "");
+          ')"
+          END=$(( $(date +%s) + KEEP_MIN * 60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
-            i=$((i+1))
-            echo "--- heartbeat #$i @ $(date -u +%H:%M:%SZ) ---"
             docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' || true
-            # In log 15 dong cuoi cua container dang restart de de chan doan
             for c in $(docker compose --env-file .env.resolved -f core/docker-compose.yml ps --format '{{.Name}} {{.State}}' | awk '$2=="restarting"{print $1}'); do
-              echo "  !! $c dang restart, log cuoi:"
-              docker logs --tail 15 "$c" 2>&1 | sed 's/^/    /' || true
+              echo "!! $c dang restart"
+              docker logs --tail 15 "$c" 2>&1 | sed 's/^/  /' || true
             done
-            curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://${DOCKFLARE_HOSTNAME}" 2>/dev/null || echo "tunnel chua san sang"
+            curl -sS -m 10 -o /dev/null -w "tunnel HTTP %{http_code}\n" "https://$HOST" || echo "tunnel chua san sang"
             if ! docker compose --env-file .env.resolved -f core/docker-compose.yml ps --status running --format '{{.Name}}' | grep -q dockflare; then
-              echo "[ERROR] DockFlare core khong con chay -> dung keep-alive"; exit 1
+              echo "[ERROR] DockFlare core khong con chay"
+              exit 1
             fi
             sleep 60
           done
