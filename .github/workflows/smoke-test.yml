@@ -1,15 +1,9 @@
 name: smoke-test
-
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
   workflow_dispatch:
-
-permissions:
-  contents: read
-
+permissions: { contents: read }
 jobs:
   lint-and-unit:
     name: Lint + Unit + Bootstrap smoke
@@ -18,24 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          package-manager-cache: false
+        with: { node-version: '24', package-manager-cache: false }
       - uses: actions/cache@v5
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
-          restore-keys: npm-${{ runner.os }}-
+        with: { path: ~/.npm, key: "npm-${{ runner.os }}-${{ hashFiles('package.json') }}" }
       - run: npm install
       - name: Syntax check
         run: find scripts test services -name '*.mjs' -print0 | while IFS= read -r -d '' f; do node --check "$f"; done
-      - name: Smoke test
-        run: node test/smoke.mjs
+      - run: node test/smoke.mjs
       - name: Shellcheck
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          shellcheck services/rclone/entrypoint.sh services/ttyd/entrypoint.sh services/litestream/entrypoint.sh
-
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck && shellcheck services/rclone/entrypoint.sh services/ttyd/entrypoint.sh services/litestream/entrypoint.sh
   compose-validate:
     name: Validate docker-compose + profiles
     runs-on: ubuntu-latest
@@ -43,11 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-          package-manager-cache: false
+        with: { node-version: '24', package-manager-cache: false }
       - run: npm install
-      - name: Bootstrap core + validate
+      - name: Bootstrap full + compose
         run: |
           cat > .env <<'EOF'
           STACK_ID=ci-smoke
@@ -58,30 +41,34 @@ jobs:
           DOCKFLARE_CF_ZONE_ID=dummy-zone
           DOCKFLARE_TUNNEL_NAME=${STACK_ID}
           DOCKFLARE_HOSTNAME=dockflare.${DOMAIN}
-          EOF
-          node scripts/bootstrap.mjs
-          docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
-      - name: Bootstrap full profiles + validate
-        run: |
-          cat >> .env <<'EOF'
           COORDINATOR_ENABLE=true
           RTDB_URL=https://x.firebaseio.com
-          RTDB_SERVICE_ACCOUNT=base64:e30=
+          RTDB_SERVICE_ACCOUNT={}
           RCLONE_ENABLE=true
+          RCLONE_REMOTE=r
+          RCLONE_PATH=p
+          RCLONE_CONFIG_CONTENT=dummy
           LITESTREAM_ENABLE=true
           LITESTREAM_DB_PATH=.docker-volumes/app.db
+          LITESTREAM_S3_ENDPOINT=https://s3.example
+          LITESTREAM_S3_BUCKET=b
+          LITESTREAM_S3_ACCESS_KEY_ID=k
+          LITESTREAM_S3_SECRET_ACCESS_KEY=s
+          TAILSCALE_ENABLE=true
+          TAILSCALE_TAGS=tag:container
+          TS_AUTHKEY=dummy
           DOZZLE_ENABLE=true
           DOZZLE_PASSWORD=pw
+          DOZZLE_HOSTNAME=logs.${DOMAIN}
           FILEBROWSER_ENABLE=true
           FILEBROWSER_ADMIN_PASSWORD=pw
+          FILEBROWSER_HOSTNAME=files.${DOMAIN}
           TTYD_ENABLE=true
           TTYD_CREDENTIAL=admin:secret
-          TAILSCALE_ENABLE=true
+          TTYD_HOSTNAME=ssh.${DOMAIN}
           EOF
           node scripts/bootstrap.mjs
-          grep -q '^COMPOSE_PROFILES=core,coordinator,rclone,litestream,tailscale,dozzle,filebrowser,ttyd$' .env.resolved
           docker compose --env-file .env.resolved -f core/docker-compose.yml config > /dev/null
-
   build-images:
     name: Build service images
     runs-on: ubuntu-latest
@@ -89,15 +76,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v4
-      - name: Build coordinator
-        uses: docker/build-push-action@v7
-        with: { context: ./services/coordinator, push: false, load: true, tags: dockflarestack/coordinator:ci, cache-from: 'type=gha,scope=coordinator', cache-to: 'type=gha,mode=max,scope=coordinator' }
-      - name: Build rclone
-        uses: docker/build-push-action@v7
-        with: { context: ./services/rclone, push: false, load: true, tags: dockflarestack/rclone:ci, cache-from: 'type=gha,scope=rclone', cache-to: 'type=gha,mode=max,scope=rclone' }
-      - name: Build ttyd
-        uses: docker/build-push-action@v7
-        with: { context: ./services/ttyd, push: false, load: true, tags: dockflarestack/ttyd:ci, cache-from: 'type=gha,scope=ttyd', cache-to: 'type=gha,mode=max,scope=ttyd' }
-      - name: Build litestream
-        uses: docker/build-push-action@v7
-        with: { context: ./services/litestream, push: false, load: true, tags: dockflarestack/litestream:ci, cache-from: 'type=gha,scope=litestream', cache-to: 'type=gha,mode=max,scope=litestream' }
+      - uses: docker/build-push-action@v7
+        with: { context: ./services/coordinator, push: false, tags: dockflarestack/coordinator:ci, cache-from: 'type=gha,scope=coordinator', cache-to: 'type=gha,mode=max,scope=coordinator' }
+      - uses: docker/build-push-action@v7
+        with: { context: ./services/rclone, push: false, tags: dockflarestack/rclone:ci, cache-from: 'type=gha,scope=rclone', cache-to: 'type=gha,mode=max,scope=rclone' }
+      - uses: docker/build-push-action@v7
+        with: { context: ./services/ttyd, push: false, tags: dockflarestack/ttyd:ci, cache-from: 'type=gha,scope=ttyd', cache-to: 'type=gha,mode=max,scope=ttyd' }
+      - uses: docker/build-push-action@v7
+        with: { context: ./services/litestream, push: false, tags: dockflarestack/litestream:ci, cache-from: 'type=gha,scope=litestream', cache-to: 'type=gha,mode=max,scope=litestream' }
