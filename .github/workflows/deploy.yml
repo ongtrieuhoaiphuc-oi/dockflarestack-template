@@ -35,10 +35,12 @@ jobs:
       - name: Pre-init Dozzle + Filebrowser
         run: |
           set -euo pipefail
-          get(){ ENV_KEY="$1" node --input-type=module -e 'import fs from "node:fs";import dotenv from "dotenv";let e=dotenv.parse(fs.readFileSync(".env.resolved"));process.stdout.write(e[process.env.ENV_KEY]||"")'; }
-          VOL="$(get DOCKER_VOLUMES_DIR)"; mkdir -p "$VOL"/{dockflare,dozzle,filebrowser,redis}
+          get(){ ENV_KEY="$1" node --input-type=module -e 'import fs from "node:fs";import dotenv from "dotenv";const e=dotenv.parse(fs.readFileSync(".env.resolved"));process.stdout.write(e[process.env.ENV_KEY]||"")'; }
+          VOL="$(get DOCKER_VOLUMES_DIR)"
+          mkdir -p "$VOL/dockflare" "$VOL/dozzle" "$VOL/filebrowser" "$VOL/redis"
           if [ "$(get DOZZLE_ENABLE)" = true ] && [ "${DOZZLE_AUTH_PROVIDER:-$(get DOZZLE_AUTH_PROVIDER)}" = simple ]; then
-            docker run --rm amir20/dozzle:latest generate "$(get DOZZLE_USERNAME || true)" --password "$(get DOZZLE_PASSWORD)" --name "${DOZZLE_USERNAME:-admin}" > "$VOL/dozzle/users.yml"
+            USERNAME="$(get DOZZLE_USERNAME)"; USERNAME="${USERNAME:-admin}"
+            docker run --rm amir20/dozzle:latest generate "$USERNAME" --password "$(get DOZZLE_PASSWORD)" --name "$USERNAME" > "$VOL/dozzle/users.yml"
             test -s "$VOL/dozzle/users.yml"
           fi
           if [ "$(get FILEBROWSER_ENABLE)" = true ]; then
